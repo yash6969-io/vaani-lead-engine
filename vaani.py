@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Vaani Lead Engine v3.4
+Vaani Lead Engine v3.5
 ======================
 Type a location (even a small area like "Gota, Ahmedabad") and get 4 lead
 databases about restaurants there:
@@ -29,11 +29,12 @@ import subprocess
 import sys
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
-VERSION = "3.4.0"
+VERSION = "3.5.0"
 UPDATE_URL = ("https://raw.githubusercontent.com/yash6969-io/"
               "vaani-lead-engine/main/vaani.py")
 
@@ -308,7 +309,7 @@ def collect_links(page, query, max_results):
             feed.evaluate("el => el.scrollTo(0, el.scrollHeight)")
         except Exception:
             break
-        page.wait_for_timeout(random.randint(1400, 2400))
+        page.wait_for_timeout(random.randint(900, 1600))
     return links[:max_results]
 
 
@@ -358,7 +359,7 @@ def _phone_candidates(page):
     # 1) the "Call phone number" link carries the number in its href
     try:
         a = page.locator('a[href^="tel:"]').first
-        href = a.get_attribute("href", timeout=3000) or ""
+        href = a.get_attribute("href", timeout=2000) or ""
         if href.startswith("tel:") and href[4:].strip():
             yield href[4:].strip()
     except Exception:
@@ -366,7 +367,7 @@ def _phone_candidates(page):
     # 2) the phone button, found by its accessible name "Phone: ..."
     try:
         b = page.get_by_role("button", name=re.compile(r"^Phone:")).first
-        m = PHONE_IN_TEXT.search(b.inner_text(timeout=3000))
+        m = PHONE_IN_TEXT.search(b.inner_text(timeout=2000))
         if m:
             yield m.group(0)
     except Exception:
@@ -374,10 +375,10 @@ def _phone_candidates(page):
     # 3) the phone element's data attribute carries the number
     try:
         el = page.locator('[data-item-id^="phone:tel:"]').first
-        item = el.get_attribute("data-item-id", timeout=3000) or ""
+        item = el.get_attribute("data-item-id", timeout=2000) or ""
         if item.startswith("phone:tel:") and item[10:].strip():
             yield item[10:].strip()
-        text = el.inner_text(timeout=2000).strip()
+        text = el.inner_text(timeout=1500).strip()
         if text:
             yield text
     except Exception:
@@ -385,7 +386,7 @@ def _phone_candidates(page):
     # 4) the button's aria-label attribute ("Phone: ...")
     try:
         el = page.locator('[aria-label^="Phone:"]').first
-        label = el.get_attribute("aria-label", timeout=3000) or ""
+        label = el.get_attribute("aria-label", timeout=2000) or ""
         if ":" in label:
             yield label.split(":", 1)[1].strip()
     except Exception:
@@ -436,14 +437,14 @@ def extract_place(page, url):
     try:
         page.wait_for_selector(
             '[data-item-id="address"], [data-item-id^="phone:tel:"], '
-            'a[data-item-id="authority"]', timeout=8000)
+            'a[data-item-id="authority"]', timeout=5000)
     except Exception:
         pass
     # scroll the side panel - lower rows (incl. phone) can load lazily
     try:
         page.mouse.move(250, 400)
         page.mouse.wheel(0, 1500)
-        page.wait_for_timeout(700)
+        page.wait_for_timeout(350)
     except Exception:
         pass
     if is_blocked(page):
@@ -473,8 +474,8 @@ def fetch_emails(website):
         try:
             req = urllib.request.Request(
                 url, headers={"User-Agent": BROWSER_UA})
-            with urllib.request.urlopen(req, timeout=12) as resp:
-                html = resp.read(400000).decode("utf-8", "replace")
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                html = resp.read(300000).decode("utf-8", "replace")
         except Exception:
             continue
         found = split_emails(html)
@@ -493,6 +494,17 @@ def scrape(location, category, max_results, want_email, headless):
             user_agent=BROWSER_UA, locale="en-IN",
             viewport={"width": 1366, "height": 800})
         page = ctx.new_page()
+        try:
+            def _block_heavy(route):
+                # map tiles, photos and fonts are heavy and carry no lead
+                # data - skipping them makes every page load much faster
+                if route.request.resource_type in ("image", "media", "font"):
+                    route.abort()
+                else:
+                    route.continue_()
+            ctx.route("**/*", _block_heavy)
+        except Exception:
+            pass
         try:
             print(f'  searching Google Maps for "{query}" ...')
             links = collect_links(page, query, max_results)
@@ -520,8 +532,7 @@ def scrape(location, category, max_results, want_email, headless):
                             f.write(page.content())
                     except Exception:
                         pass
-                d["emails"] = (fetch_emails(d["website"])
-                               if want_email and d["website"] else [])
+                d["emails"] = []  # websites are checked after, in parallel
                 results.append(d)
                 mob = split_phones(d["phone"])
                 line = f"  [{i}/{len(links)}] {d['name'][:44]}"
@@ -529,7 +540,20 @@ def scrape(location, category, max_results, want_email, headless):
                 if d["emails"]:
                     line += f"  - {d['emails'][0]}"
                 print(line)
-                page.wait_for_timeout(random.randint(700, 1600))
+                page.wait_for_timeout(random.randint(250, 600))
+            if want_email:
+                sites = [r for r in results if r.get("website")]
+                if sites:
+                    print(f"\n  checking {len(sites)} restaurant websites "
+                          "for email IDs (several at a time)...")
+                    with ThreadPoolExecutor(max_workers=6) as ex:
+                        for r, em in zip(sites, ex.map(
+                                lambda x: fetch_emails(x["website"]),
+                                sites)):
+                            r["emails"] = em
+                    got = sum(1 for r in sites if r["emails"])
+                    print(f"  email IDs found for {got} of {len(sites)} "
+                          "places")
             missed = sum(1 for r in results
                          if not split_phones(r["phone"]))
             if results and missed:
@@ -606,6 +630,136 @@ def write_excel(path, leads):
     ws.auto_filter.ref = ws.dimensions
     ws.row_dimensions[1].height = 26
     wb.save(path)
+
+
+TRACKER_NAME = "vaani-call-tracker.xlsx"
+OUTCOMES = ("Not called,No answer,Interested,Callback,"
+            "Deck sent,Not interested,Wrong number")
+
+
+def _style_tracker_sheet(ws, last_row):
+    """Give a fresh sheet the call tracker's layout: violet headers, the
+    outcome summary on the right, and the Outcome dropdown in column F."""
+    from openpyxl.styles import Font, PatternFill
+    from openpyxl.worksheet.datavalidation import DataValidation
+    head_fill = PatternFill("solid", fgColor="3B1F5E")
+    head_font = Font(bold=True, color="FFFFFF")
+    for c, h in enumerate(["#", "Restaurant name", "Phone", "Location",
+                           "Email", "Outcome", "Callback date", "Notes"], 1):
+        cell = ws.cell(row=1, column=c, value=h)
+        cell.fill = head_fill
+        cell.font = head_font
+    for c, h in ((10, "Outcome"), (11, "Count")):
+        cell = ws.cell(row=1, column=c, value=h)
+        cell.fill = head_fill
+        cell.font = head_font
+    for i, o in enumerate(OUTCOMES.split(",")):
+        r = i + 2
+        ws.cell(row=r, column=10, value=o)
+        ws.cell(row=r, column=11, value=f"=COUNTIF(F2:F{last_row},J{r})")
+    ws.cell(row=9, column=10, value="TOTAL")
+    ws.cell(row=9, column=11, value="=SUM(K2:K8)")
+    for col, w in {"A": 5, "B": 30, "C": 16, "D": 26, "E": 30, "F": 16,
+                   "G": 15, "H": 34, "J": 18, "K": 10}.items():
+        ws.column_dimensions[col].width = w
+    dv = DataValidation(type="list", formula1=f'"{OUTCOMES}"',
+                        allow_blank=True)
+    dv.add(f"F2:F{last_row}")
+    ws.add_data_validation(dv)
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = f"A1:H{last_row}"
+
+
+def update_tracker(leads):
+    """Put the leads straight into vaani-call-tracker.xlsx - no copy-paste.
+
+    Leads go into a sheet named for today (e.g. "21 Oct 2026"). A run on
+    another day creates that day's sheet in the SAME file; a second run on
+    the same day only adds leads whose phone is not already in today's
+    sheet. Returns (added, already_there, sheet_name), or None if the
+    tracker could not be updated (the CSV/Excel outputs are unaffected).
+    """
+    if not ensure_openpyxl():
+        return None
+    import openpyxl
+    from openpyxl.worksheet.datavalidation import DataValidation
+    path = os.path.join(HERE, TRACKER_NAME)
+    sheet_name = date.today().strftime("%d %b %Y")
+    try:
+        if os.path.exists(path):
+            wb = openpyxl.load_workbook(path)
+        else:
+            wb = openpyxl.Workbook()
+            wb.remove(wb.active)
+    except Exception:
+        return None
+    try:
+        if sheet_name in wb.sheetnames:
+            ws = wb[sheet_name]
+        elif "Call Tracker" in wb.sheetnames:
+            ws = wb.copy_worksheet(wb["Call Tracker"])
+            ws.title = sheet_name
+            for row in ws.iter_rows(min_row=2, max_row=ws.max_row,
+                                    max_col=8):
+                for cell in row:
+                    if cell.column != 6:  # keep Outcome = "Not called"
+                        cell.value = None
+        else:
+            ws = wb.create_sheet(sheet_name)
+            _style_tracker_sheet(ws, 200)
+        existing, last_filled = set(), 1
+        for r in range(2, ws.max_row + 1):
+            if ws.cell(row=r, column=2).value:
+                last_filled = r
+            phone = ws.cell(row=r, column=3).value
+            if phone:
+                for part in re.split(r"[,;/|]", str(phone)):
+                    d = re.sub(r"\D", "", part)
+                    if len(d) >= 10:
+                        existing.add(d[-10:])
+        added, already, r = 0, 0, last_filled
+        for lead in leads:
+            keys = set()
+            for part in re.split(r"[,;/|]", lead["phone"]):
+                d = re.sub(r"\D", "", part)
+                if len(d) >= 10:
+                    keys.add(d[-10:])
+            if keys & existing:
+                already += 1
+                continue
+            r += 1
+            ws.cell(row=r, column=1, value=r - 1)
+            ws.cell(row=r, column=2, value=lead["name"])
+            ws.cell(row=r, column=3, value=lead["phone"])
+            ws.cell(row=r, column=4, value=lead["location"])
+            ws.cell(row=r, column=5, value=lead["email"])
+            ws.cell(row=r, column=6, value="Not called")
+            existing |= keys
+            added += 1
+        last_row = max(r, 41)
+        keep = [dv for dv in ws.data_validations.dataValidation
+                if "F" not in str(dv.sqref)]
+        ws.data_validations.dataValidation = keep
+        dv = DataValidation(type="list", formula1=f'"{OUTCOMES}"',
+                            allow_blank=True)
+        dv.add(f"F2:F{last_row}")
+        ws.add_data_validation(dv)
+        for i in range(7):
+            rr = i + 2
+            ws.cell(row=rr, column=11,
+                    value=f"=COUNTIF(F2:F{last_row},J{rr})")
+        wb.active = wb.sheetnames.index(sheet_name)
+        wb.save(path)
+        return added, already, sheet_name
+    except PermissionError:
+        print("\n  (!) The call tracker is open in Excel, so today's leads")
+        print("      could not be added to it. Close vaani-call-tracker.xlsx")
+        print("      and run again - the CSV and Excel files are saved.")
+        return None
+    except Exception as e:
+        print(f"\n  (!) Could not update the call tracker ({e}).")
+        print("      The CSV and Excel files are saved as usual.")
+        return None
 
 
 # ---------------------------------------------------------------- main
@@ -699,12 +853,23 @@ def main():
         except Exception as e:
             print(f"  (!) Excel file failed: {e}")
 
+    tracker_result = update_tracker(leads)
+
     # ---- summary -----------------------------------------------------------
     print("\n  DONE")
     print(f"  Restaurants in your database : {len(names)} "
           "(every one has a mobile number)")
     print(f"  Left out - no mobile number  : {skipped_no_phone}")
     print(f"  Email IDs                    : {len(emails)}")
+    if tracker_result:
+        t_added, t_already, t_sheet = tracker_result
+        print(f"  Call tracker                 : {t_added} lead(s) added "
+              f"to sheet '{t_sheet}'")
+        if t_already:
+            print(f"                               : {t_already} already in "
+                  "today's sheet - skipped")
+        print(f"                               : in {TRACKER_NAME} - ready "
+              "to call, no copy-paste")
     print(f"\n  Your 4 databases are in:\n  {outdir}")
     print("    - restaurant_names.csv")
     print("    - locations.csv")
