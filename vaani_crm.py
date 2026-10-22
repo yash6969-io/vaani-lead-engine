@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Vaani CRM v1.1
+Vaani CRM v1.2
 ==============
 A personal CRM for the leads Vaani scrapes - just for you, on your own
 computer. Excel was never built for follow-ups, remarks and daily call
@@ -34,7 +34,7 @@ DB_PATH = os.path.join(HERE, "vaani_master.db")
 TRACKER_PATH = os.path.join(HERE, "vaani-call-tracker.xlsx")
 BACKUP_PATH = os.path.join(HERE, "vaani_master.db.crm-backup")
 
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 UPDATE_URL = ("https://raw.githubusercontent.com/yash6969-io/"
               "vaani-lead-engine/main/vaani_crm.py")
 PORTS = (8765, 8766, 8767, 8768, 8769)
@@ -94,6 +94,57 @@ def self_update():
     env["VAANI_CRM_NO_UPDATE"] = "1"
     subprocess.Popen([sys.executable, me] + sys.argv[1:], env=env)
     sys.exit(0)
+
+
+# ---------------------------------------------------------------- browser launch
+
+def _chrome_paths():
+    cands = []
+    if os.name == "nt":
+        for env in ("ProgramFiles", "ProgramFiles(x86)",
+                    "LocalAppData"):
+            base = os.environ.get(env)
+            if base:
+                cands.append(os.path.join(
+                    base, "Google", "Chrome", "Application",
+                    "chrome.exe"))
+    else:
+        for name in ("google-chrome", "google-chrome-stable",
+                     "chromium", "chromium-browser"):
+            p = shutil.which(name)
+            if p:
+                cands.append(p)
+    return [c for c in cands if os.path.exists(c)]
+
+
+def open_browser(url):
+    """Open the CRM in Google Chrome as its own app window when
+    Chrome is installed - not in whatever the Windows default
+    browser happens to be. Falls back to the default browser.
+    Force the default with --browser=default (or the environment
+    variable VAANI_CRM_BROWSER=default)."""
+    pref = os.environ.get("VAANI_CRM_BROWSER", "chrome").lower()
+    for a in sys.argv[1:]:
+        if a.startswith("--browser="):
+            pref = a.split("=", 1)[1].lower()
+    if pref != "default":
+        for p in _chrome_paths():
+            try:
+                subprocess.Popen(
+                    [p, f"--app={url}"], stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL)
+                return
+            except Exception:
+                continue
+        try:
+            if webbrowser.get("chrome").open(url):
+                return
+        except Exception:
+            pass
+    try:
+        webbrowser.open(url)
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------- database
@@ -720,6 +771,74 @@ tbody tr:hover td, table tr:hover td { background:#F8FAFC; }
   text-transform:uppercase; letter-spacing:.05em; font-weight:600; }
 .detail-grid .v { font-size:15px; margin:2px 0 13px; }
 .crumbs { font-size:13px; color:var(--muted); margin-bottom:8px; }
+.hero { position:relative; overflow:hidden; border-radius:18px;
+  padding:27px 30px; color:#EAF6F3; margin-bottom:18px;
+  background:linear-gradient(118deg,#0A1B24 0%,#0D3040 52%,#0F766E 135%);
+  box-shadow:0 10px 30px rgba(11,29,38,.25); }
+.hero::before { content:''; position:absolute; width:380px;
+  height:380px; border-radius:50%; top:-190px; right:-70px;
+  background:radial-gradient(circle,rgba(45,212,191,.38),
+  rgba(45,212,191,0) 65%); }
+.hero::after { content:''; position:absolute; width:260px;
+  height:260px; border-radius:50%; bottom:-170px; left:34%;
+  background:radial-gradient(circle,rgba(20,184,166,.22),
+  rgba(20,184,166,0) 65%); }
+.hero h1 { color:#fff; font-size:27px; margin:0 0 5px;
+  letter-spacing:-.02em; position:relative; z-index:1; }
+.hero .hsub { color:#A9C6BE; font-size:14.5px; position:relative;
+  z-index:1; }
+.hero .hstats { display:flex; gap:26px; margin-top:17px;
+  position:relative; z-index:1; flex-wrap:wrap; }
+.hero .hstat .n { font-size:21px; font-weight:780; color:#fff;
+  font-variant-numeric:tabular-nums; }
+.hero .hstat .l { font-size:12px; color:#A9C6BE; }
+.hero .hcta { margin-top:19px; display:flex; gap:10px;
+  position:relative; z-index:1; }
+.hero .btn { background:#2DD4BF; color:#07332C;
+  box-shadow:0 4px 16px rgba(45,212,191,.4); }
+.hero .btn:hover { background:#5EEAD4; }
+.hero .btn.ghost { background:rgba(255,255,255,.09); color:#EAF6F3;
+  border:1px solid rgba(255,255,255,.25); box-shadow:none; }
+.hero .btn.ghost:hover { background:rgba(255,255,255,.17); }
+.cards2 { display:grid; gap:13px;
+  grid-template-columns:repeat(auto-fit,minmax(228px,1fr)); }
+.kpi2 { background:var(--panel); border:1px solid var(--line);
+  border-radius:16px; padding:17px 19px 14px; box-shadow:var(--shadow);
+  transition:transform .15s ease, box-shadow .15s ease; }
+.kpi2:hover { transform:translateY(-2px);
+  box-shadow:0 8px 22px rgba(16,24,40,.09); }
+.kpi2 .top { display:flex; justify-content:space-between;
+  align-items:center; }
+.kpi2 .lbl { font-size:11.5px; font-weight:680; color:var(--muted);
+  text-transform:uppercase; letter-spacing:.07em; }
+.kpi2 .ic2 { width:33px; height:33px; border-radius:10px;
+  background:#F1F5F9; color:#475467; display:flex;
+  align-items:center; justify-content:center; }
+.kpi2 .ic2.red { background:#FDECEA; color:#B42318; }
+.kpi2 .ic2.green { background:#DCFCE7; color:#166534; }
+.kpi2 .num { font-size:32px; font-weight:800; letter-spacing:-.025em;
+  font-variant-numeric:tabular-nums; line-height:1.12; margin-top:7px; }
+.kpi2 .num.red { color:var(--red); }
+.kpi2 .foot { display:flex; align-items:flex-end;
+  justify-content:space-between; gap:10px; margin-top:9px;
+  min-height:30px; }
+.kpi2 .note { font-size:12.5px; color:var(--muted); }
+.kpi2 .note.red { color:#B42318; font-weight:620; }
+.delta { font-size:12px; font-weight:720; padding:2px 8px;
+  border-radius:20px; white-space:nowrap; }
+.delta.up { background:#DCFCE7; color:#166534; }
+.delta.down { background:#FDECEA; color:#B42318; }
+.delta.flat { background:#EEF1F4; color:#667085; }
+.spark { display:inline-flex; align-items:flex-end; gap:2.5px;
+  height:30px; }
+.spark i { width:6px; background:#CBD8DE; border-radius:2px;
+  display:block; }
+.spark i:last-child { background:var(--accent); }
+.segbar { display:flex; height:9px; border-radius:6px;
+  overflow:hidden; background:#EEF1F4; width:100%; }
+.segbar i { display:block; height:100%; }
+.fpct { width:46px; flex:none; color:var(--muted); font-size:12.5px; }
+.ringwrap { display:flex; align-items:center; gap:13px; }
 @media (max-width:1080px) { .detail-grid { grid-template-columns:1fr; }
   .searchbox input { width:200px; } }
 """
@@ -824,49 +943,165 @@ def task_card(r, kind="overdue"):
         f'Open</a></div>')
 
 
+def delta_chip(cur, prev):
+    if prev == 0:
+        if cur > 0:
+            return f'<span class="delta up">&#9650; {cur} new</span>'
+        return '<span class="delta flat">- no change</span>'
+    pct = round((cur - prev) * 100 / prev)
+    if pct > 0:
+        return (f'<span class="delta up">&#9650; {pct}%</span>'
+                f' <span class="note">vs last week</span>')
+    if pct < 0:
+        return (f'<span class="delta down">&#9660; {abs(pct)}%</span>'
+                f' <span class="note">vs last week</span>')
+    return '<span class="delta flat">- same as last week</span>'
+
+
+def spark_bars(values):
+    mx = max(values) if values else 0
+    bars = ""
+    for v in values:
+        h = 3 if mx == 0 else max(3, round(v * 27 / mx))
+        bars += f'<i style="height:{h}px"></i>'
+    return f'<span class="spark">{bars}</span>'
+
+
 def dashboard_html(conn):
     total = conn.execute("SELECT COUNT(*) c FROM leads").fetchone()["c"]
+    today = date.today()
     date_line = datetime.now().strftime("%A, %d %B %Y")
-    head = (f"<h1>{greeting()}, {esc(USER_NAME)}</h1>"
-            f'<div class="sub">{date_line} - here is where your '
-            f'leads stand.</div>')
     if total == 0:
-        return head + (
-            '<div class="empty" style="margin-top:18px">No leads '
-            'yet.<br>Run Vaani once (double-click <b>run-vaani.bat'
-            '</b>) and every restaurant it scrapes will appear here '
-            'automatically.</div>')
-    tier_a = conn.execute(
-        "SELECT COUNT(*) c FROM leads WHERE tier = 'A'").fetchone()["c"]
+        return (f"<h1>{greeting()}, {esc(USER_NAME)}</h1>"
+                f'<div class="sub">{date_line}</div>'
+                '<div class="empty" style="margin-top:18px">No leads '
+                'yet.<br>Run Vaani once (double-click <b>run-vaani.bat'
+                '</b>) and every restaurant it scrapes will appear '
+                'here automatically.</div>')
     counts = {}
     for row in conn.execute(
             "SELECT COALESCE(s.status, 'Not called') st, COUNT(*) c"
             " FROM leads l LEFT JOIN crm_state s ON s.phone = l.phone"
             " GROUP BY st"):
         counts[row["st"]] = row["c"]
+    tiers = {}
+    for row in conn.execute(
+            "SELECT tier, COUNT(*) c FROM leads GROUP BY tier"):
+        if row["tier"]:
+            tiers[row["tier"]] = row["c"]
+    tier_a = tiers.get("A", 0)
     demos = counts.get("Demo booked", 0) + counts.get("Demo done", 0)
     won = counts.get("Won", 0)
     overdue, due_today, _ = due_leads(conn)
 
-    def kpi(ic, bg, fg, num, lbl, red=False):
-        return (f'<div class="kpi{" red" if red else ""}">'
-                f'<div class="ic" style="background:{bg};color:{fg}">'
-                f'{icon(ic, 20)}</div><div><div class="num">{num}'
-                f'</div><div class="lbl">{lbl}</div></div></div>')
+    # new-lead trend: sparkline (14 days) + week-on-week delta
+    daily = {}
+    for row in conn.execute(
+            "SELECT substr(first_seen, 1, 10) d, COUNT(*) c FROM leads"
+            " WHERE first_seen >= ? GROUP BY d",
+            ((today - timedelta(days=13)).isoformat(),)):
+        daily[row["d"]] = row["c"]
+    vals = [daily.get((today - timedelta(days=i)).isoformat(), 0)
+            for i in range(13, -1, -1)]
+    new_cur = sum(vals[7:])
+    new_prev = sum(vals[:7])
 
-    cards = ('<div class="cards">'
-             + kpi("users", "#E0E9F7", "#14487A", total, "Total leads")
-             + kpi("flame", "#DCFCE7", "#166534", tier_a,
-                   "A-tier - call today")
-             + kpi("calendar", "#FEF3C7", "#92400E", len(due_today),
-                   "Follow-ups due today")
-             + kpi("clock", "#FDECEA", "#B42318", len(overdue),
-                   "Overdue follow-ups", red=bool(overdue))
-             + kpi("phone", "#CCFBF1", "#0F766E", demos,
-                   "Demos booked / done")
-             + kpi("check", "#DCFCE7", "#166534", won, "Won")
-             + '</div>')
-    body = head + cards
+    # demos won this week vs last week (from the status timeline)
+    def demo_events(since, until):
+        return conn.execute(
+            "SELECT COUNT(*) c FROM crm_remarks WHERE source ="
+            " 'status' AND (text LIKE '%\u2192 Demo booked%' OR"
+            " text LIKE '%\u2192 Demo done%') AND ts >= ? AND ts < ?",
+            (since, until)).fetchone()["c"]
+    wk = (today - timedelta(days=6)).isoformat()
+    pw = (today - timedelta(days=13)).isoformat()
+    tm = (today + timedelta(days=1)).isoformat()
+    demos_cur = demo_events(wk, tm)
+    demos_prev = demo_events(pw, wk)
+
+    closed = sum(counts.get(s, 0) for s in
+                 ("Won", "Lost", "Not interested", "Wrong number",
+                  "Do not contact"))
+    won_pct = round(won * 100 / closed) if closed else 0
+    contacted = total - counts.get("Not called", 0)
+    contacted_pct = round(contacted * 100 / total) if total else 0
+
+    need = len(overdue) + len(due_today)
+    hstats = (
+        f'<div class="hstats">'
+        f'<div class="hstat"><div class="n">{need}</div>'
+        f'<div class="l">follow-ups need you today</div></div>'
+        f'<div class="hstat"><div class="n">'
+        f'{counts.get("Not called", 0)}</div>'
+        f'<div class="l">leads never called yet</div></div>'
+        f'<div class="hstat"><div class="n">{tier_a}</div>'
+        f'<div class="l">A-tier leads in the bank</div></div>'
+        f'<div class="hstat"><div class="n">{demos}</div>'
+        f'<div class="l">demos in motion</div></div></div>')
+    hero = (
+        f'<div class="hero"><h1>{greeting()}, {esc(USER_NAME)}</h1>'
+        f'<div class="hsub">{date_line} - here is where your leads '
+        f'stand.</div>{hstats}'
+        f'<div class="hcta"><a class="btn" href="/call">'
+        f'{icon("phone", 16)} Start calling</a>'
+        f'<a class="btn ghost" href="/board">View pipeline</a>'
+        f'</div></div>')
+
+    def kpi2(lbl, ic, num, foot, ic_cls="", num_cls=""):
+        return (f'<div class="kpi2"><div class="top">'
+                f'<span class="lbl">{lbl}</span>'
+                f'<span class="ic2 {ic_cls}">{icon(ic, 17)}</span></div>'
+                f'<div class="num {num_cls}">{num}</div>'
+                f'<div class="foot">{foot}</div></div>')
+
+    seg = ""
+    tot_t = sum(tiers.values()) or 1
+    for t, col in (("A", "#22C55E"), ("B", "#F59E0B"),
+                   ("C", "#CBD5DC")):
+        w = round(tiers.get(t, 0) * 100 / tot_t)
+        if w:
+            seg += f'<i style="width:{w}%;background:{col}"></i>'
+    a_pct = round(tier_a * 100 / tot_t) if tot_t else 0
+    card_total = kpi2(
+        "Total leads", "users", total,
+        f'<span>{delta_chip(new_cur, new_prev)}</span>'
+        f'{spark_bars(vals)}')
+    card_a = kpi2(
+        "A-tier - call today", "flame", tier_a,
+        f'<span class="segbar">{seg}</span>'
+        f'<span class="note">{a_pct}% A</span>')
+    if overdue:
+        due_note = (f'<span class="note red">{len(overdue)} also '
+                    f'overdue</span>')
+    else:
+        due_note = '<span class="note">Nothing overdue</span>'
+    card_due = kpi2("Due today", "calendar", len(due_today),
+                    due_note + '<span class="note">follow-ups</span>')
+    if overdue:
+        oldest = min(r["followup"] for r in overdue)
+        od = (today - date.fromisoformat(oldest)).days
+        od_note = f'<span class="note red">Oldest: {od}d overdue</span>'
+    else:
+        od_note = '<span class="note">All clear</span>'
+    card_od = kpi2("Overdue", "clock", len(overdue),
+                   od_note + '<span class="note">follow-ups</span>',
+                   ic_cls="red" if overdue else "",
+                   num_cls="red" if overdue else "")
+    if demos_cur or demos_prev:
+        demo_foot = f'<span>{delta_chip(demos_cur, demos_prev)}</span>'
+    else:
+        demo_foot = '<span class="note">Book one from Call Mode</span>'
+    card_demo = kpi2("Demos booked / done", "phone", demos, demo_foot)
+    if closed:
+        won_foot = (f'<span class="note">{won_pct}% of closed leads '
+                    f'won</span>')
+    else:
+        won_foot = '<span class="note">No closed leads yet</span>'
+    card_won = kpi2("Won", "check", won, won_foot,
+                    ic_cls="green" if won else "")
+    body = hero + ('<div class="cards2">' + card_total + card_a
+                   + card_due + card_od + card_demo + card_won
+                   + '</div>')
     if overdue:
         body += f"<h2>Overdue - clear these first ({len(overdue)})</h2>"
         body += "".join(task_card(r, "overdue") for r in overdue)
@@ -889,12 +1124,32 @@ def dashboard_html(conn):
         elif s in ("Lost", "Not interested", "Wrong number",
                    "Do not contact"):
             bar_cls += " bad"
+        pct = round(c * 100 / total) if total else 0
         rows += (f'<div class="funnel-row"><div class="fl">'
                  f'{status_pill(s)}</div><div class="ft">'
                  f'<div class="{bar_cls}" style="width:'
                  f'{max(3, round(c * 100 / maxc))}%"></div></div>'
-                 f'<div class="fc">{c}</div></div>')
-    body += (f'<h2>Your funnel</h2><div class="panel">{rows}</div>')
+                 f'<div class="fc">{c}</div>'
+                 f'<div class="fpct">{pct}%</div></div>')
+    circ = 157.1
+    off = circ * (1 - contacted_pct / 100)
+    ring = (
+        f'<div class="ringwrap"><svg width="66" height="66" '
+        f'viewBox="0 0 66 66"><circle cx="33" cy="33" r="25" '
+        f'fill="none" stroke="#EEF1F4" stroke-width="8"/>'
+        f'<circle cx="33" cy="33" r="25" fill="none" '
+        f'stroke="#0F766E" stroke-width="8" stroke-linecap="round" '
+        f'stroke-dasharray="{circ}" stroke-dashoffset="{off:.1f}" '
+        f'transform="rotate(-90 33 33)"/>'
+        f'<text x="33" y="34" text-anchor="middle" '
+        f'dominant-baseline="central" font-size="14.5" '
+        f'font-weight="800" fill="#101828">{contacted_pct}%</text>'
+        f'</svg><div><b>Leads contacted</b><div class="small">'
+        f'{contacted} of {total} leads have had a first call or '
+        f'beyond</div></div></div>')
+    body += (f'<h2>Your funnel</h2><div class="panel">'
+             f'<div style="margin-bottom:12px">{ring}</div>'
+             f'{rows}</div>')
     recents = conn.execute(
         "SELECT r.*, l.name FROM crm_remarks r JOIN leads l"
         " ON l.phone = r.phone WHERE r.source != 'status'"
@@ -1441,10 +1696,7 @@ def main():
     print("  Keep this window open while you work in the CRM.")
     print("  To stop: close this window or press Ctrl+C.")
     print()
-    try:
-        webbrowser.open(url)
-    except Exception:
-        pass
+    open_browser(url)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
