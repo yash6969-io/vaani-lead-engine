@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Vaani CRM v1.0
+Vaani CRM v1.1
 ==============
 A personal CRM for the leads Vaani scrapes - just for you, on your own
 computer. Excel was never built for follow-ups, remarks and daily call
@@ -34,10 +34,11 @@ DB_PATH = os.path.join(HERE, "vaani_master.db")
 TRACKER_PATH = os.path.join(HERE, "vaani-call-tracker.xlsx")
 BACKUP_PATH = os.path.join(HERE, "vaani_master.db.crm-backup")
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 UPDATE_URL = ("https://raw.githubusercontent.com/yash6969-io/"
               "vaani-lead-engine/main/vaani_crm.py")
 PORTS = (8765, 8766, 8767, 8768, 8769)
+USER_NAME = "Yash"
 
 STATUSES = ["Not called", "No answer", "Staff reached",
             "Decision-maker reached", "Conversation", "Interested",
@@ -278,8 +279,10 @@ LEAD_SELECT = """
     SELECT l.*, COALESCE(s.status, 'Not called') AS status,
            COALESCE(s.followup, '') AS followup,
            (SELECT COUNT(*) FROM crm_remarks r
-             WHERE r.phone = l.phone) AS n_remarks,
+             WHERE r.phone = l.phone AND r.source != 'status')
+             AS n_remarks,
            (SELECT r.text FROM crm_remarks r WHERE r.phone = l.phone
+             AND r.source != 'status'
              ORDER BY r.id DESC LIMIT 1) AS last_remark
     FROM leads l LEFT JOIN crm_state s ON s.phone = l.phone
 """
@@ -333,10 +336,33 @@ def due_leads(conn):
     return overdue, due_today, upcoming
 
 
-def set_status(conn, phone, status, followup):
+def call_queue(conn):
+    """Today's calling queue, in the order a rep should work it:
+    overdue follow-ups first, then today's follow-ups, then fresh
+    A-tier and B-tier leads that have never been called."""
+    overdue, due_today, _ = due_leads(conn)
+    seen = {r["phone"] for r in overdue + due_today}
+    fresh = [r for r in fetch_leads(conn, status="Not called")
+             if r["phone"] not in seen and r["tier"] in ("A", "B")]
+    fresh.sort(key=lambda r: (-(r["score"] or 0)))
+    a_first = [r for r in fresh if r["tier"] == "A"] + \
+        [r for r in fresh if r["tier"] == "B"]
+    return overdue + due_today + a_first
+
+
+def set_status(conn, phone, status, followup=""):
+    """followup=None keeps the existing follow-up date untouched."""
     if status not in STATUSES:
         return False
-    followup = _parse_date(followup) if followup else ""
+    cur = conn.execute(
+        "SELECT status, followup FROM crm_state WHERE phone = ?",
+        (phone,)).fetchone()
+    old_status = cur["status"] if cur else "Not called"
+    old_followup = cur["followup"] if cur else ""
+    if followup is None:
+        followup = old_followup or ""
+    else:
+        followup = _parse_date(followup) if followup else ""
     now = datetime.now().isoformat(timespec="seconds")
     conn.execute(
         "INSERT INTO crm_state (phone, status, followup, updated_at)"
@@ -357,6 +383,17 @@ def set_status(conn, phone, status, followup):
             " AND suppress_reason IN ('Not interested',"
             " 'Wrong number', 'Do not contact', 'marked in tracker')",
             (phone,))
+    events = []
+    if status != old_status:
+        events.append(f"Status: {old_status} \u2192 {status}")
+    if followup != (old_followup or ""):
+        events.append("Follow-up: " + (fmt_date(followup)
+                                       if followup else "cleared"))
+    if events:
+        conn.execute(
+            "INSERT INTO crm_remarks (phone, ts, text, source)"
+            " VALUES (?, ?, ?, 'status')",
+            (phone, now, " \u00b7 ".join(events)))
     conn.commit()
     return True
 
@@ -403,6 +440,22 @@ def fmt_phone(phone):
     return p
 
 
+MONO_COLORS = [("#E0F2F1", "#0F766E"), ("#E0E7FF", "#3730A3"),
+               ("#FEF3C7", "#92400E"), ("#FCE7F3", "#9D174D"),
+               ("#E0F2FE", "#075985"), ("#ECFCCB", "#3F6212"),
+               ("#F3E8FF", "#6B21A8"), ("#FFE4E6", "#9F1239")]
+
+
+def monogram(name, phone):
+    words = [w for w in re.split(r"[^A-Za-z]+", str(name or "?"))
+             if w]
+    initials = "".join(w[0].upper() for w in words[:2]) or "?"
+    idx = sum(ord(c) for c in str(phone)) % len(MONO_COLORS)
+    bg, fg = MONO_COLORS[idx]
+    return (f'<span class="mono" style="background:{bg};color:{fg}">'
+            f'{esc(initials)}</span>')
+
+
 def tier_badge(tier):
     if not tier:
         return '<span class="badge bC">-</span>'
@@ -429,99 +482,306 @@ def status_pill(status):
     return f'<span class="pill {cls}">{esc(status)}</span>'
 
 
+def followup_chip(lead):
+    fu = lead["followup"]
+    if not fu or lead["status"] in TERMINAL_STATUSES:
+        return ""
+    today = date.today().isoformat()
+    if fu < today:
+        d = (date.today() - date.fromisoformat(fu)).days
+        return (f'<span class="chip chip-red">&#9200; {d}d overdue</span>')
+    if fu == today:
+        return '<span class="chip chip-amber">&#9200; Due today</span>'
+    return (f'<span class="chip chip-gray">&#9200; '
+            f'{fmt_date(fu)}</span>')
+
+
+# ---------------------------------------------------------------- design system
+
+ICONS = {
+    "grid": '<rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/>',
+    "phone": '<path d="M22 16.9v3a2 2 0 0 1-2.2 2 19.8 19.8 0 0 1-8.6-3.1 19.5 19.5 0 0 1-6-6A19.8 19.8 0 0 1 2.1 4.2 2 2 0 0 1 4.1 2h3a2 2 0 0 1 2 1.7c.13.96.36 1.9.7 2.8a2 2 0 0 1-.45 2.1L8.1 9.9a16 16 0 0 0 6 6l1.3-1.3a2 2 0 0 1 2.1-.45c.9.34 1.84.57 2.8.7A2 2 0 0 1 22 16.9z"/>',
+    "board": '<rect x="3" y="3" width="5.5" height="18" rx="1.5"/><rect x="9.75" y="3" width="5.5" height="12" rx="1.5"/><rect x="16.5" y="3" width="5.5" height="8" rx="1.5"/>',
+    "users": '<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>',
+    "clock": '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
+    "download": '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/><path d="M12 15V3"/>',
+    "search": '<circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/>',
+    "flame": '<path d="M8.5 14.5A2.5 2.5 0 0 0 11 12c0-1.38-.5-2-1-3-1.072-2.143-.224-4.054 2-6 .5 2.5 2 4.9 4 6.5 2 1.6 3 3.5 3 5.5a7 7 0 1 1-14 0c0-1.153.433-2.294 1-3a2.5 2.5 0 0 0 2.5 2.5z"/>',
+    "check": '<path d="M20 6 9 17l-5-5"/>',
+    "calendar": '<rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4"/><path d="M8 2v4"/><path d="M3 10h18"/>',
+}
+
+
+def icon(name, size=18):
+    return (f'<svg width="{size}" height="{size}" viewBox="0 0 24 24" '
+            f'fill="none" stroke="currentColor" stroke-width="2" '
+            f'stroke-linecap="round" stroke-linejoin="round">'
+            f'{ICONS.get(name, "")}</svg>')
+
+
 CSS = """
-* { box-sizing: border-box; }
-body { margin: 0; font-family: 'Segoe UI', Arial, sans-serif;
-  background: #F4F6F7; color: #1c2b30; }
-header { background: #1F4E5F; color: #fff; padding: 12px 22px;
-  display: flex; align-items: center; gap: 22px; flex-wrap: wrap; }
-header .brand { font-size: 20px; font-weight: 700; letter-spacing: .3px; }
-header nav a { color: #CFE3E9; text-decoration: none; margin-right: 16px;
-  font-size: 14.5px; }
-header nav a:hover { color: #fff; text-decoration: underline; }
-.alertbar { background: #B3261E; color: #fff; padding: 9px 22px;
-  font-size: 14.5px; }
-.alertbar.ok { background: #2E7D32; }
-main { max-width: 1240px; margin: 0 auto; padding: 20px 22px 42px; }
-h1 { font-size: 22px; margin: 4px 0 14px; }
-h2 { font-size: 16.5px; margin: 26px 0 10px; color: #1F4E5F; }
-.cards { display: flex; gap: 12px; flex-wrap: wrap; }
-.card { background: #fff; border: 1px solid #dde3e6; border-radius: 10px;
-  padding: 14px 18px; min-width: 138px; }
-.card .num { font-size: 26px; font-weight: 700; color: #1F4E5F; }
-.card .lbl { font-size: 12.5px; color: #5a6a70; margin-top: 2px; }
-.card.red .num { color: #B3261E; }
-table { width: 100%; border-collapse: collapse; background: #fff;
-  border: 1px solid #dde3e6; border-radius: 10px; overflow: hidden; }
-th { background: #EAF1F3; text-align: left; font-size: 12.5px;
-  padding: 9px 10px; color: #33525d; }
-td { padding: 8px 10px; font-size: 14px; border-top: 1px solid #edf1f2;
-  vertical-align: top; }
-tr:hover td { background: #f7fafb; }
-a { color: #1668b4; }
-.badge { display: inline-block; min-width: 22px; text-align: center;
-  padding: 1px 6px; border-radius: 6px; font-weight: 700; font-size: 13px;
-  color: #fff; }
-.bA { background: #2E7D32; } .bB { background: #B26A00; }
-.bC { background: #8a979c; }
-.pill { display: inline-block; padding: 1px 9px; border-radius: 20px;
-  font-size: 12.5px; white-space: nowrap; }
-.st-new { background: #E3ECF7; color: #14487a; }
-.st-mid { background: #EDEFF1; color: #444; }
-.st-hot { background: #FFE9C7; color: #7a4a00; }
-.st-good { background: #D8F0DA; color: #1d5c26; }
-.st-bad { background: #F6DAD8; color: #8c1d18; }
-.st-dead { background: #3d3d3d; color: #fff; }
-.filters { background: #fff; border: 1px solid #dde3e6; border-radius: 10px;
-  padding: 12px 14px; display: flex; gap: 10px; flex-wrap: wrap;
-  align-items: end; margin-bottom: 14px; }
-.filters label { font-size: 12px; color: #5a6a70; display: block;
-  margin-bottom: 3px; }
-input, select, textarea { font: inherit; font-size: 14px; padding: 7px 9px;
-  border: 1px solid #bfccd1; border-radius: 7px; background: #fff; }
-button, .btn { background: #1F4E5F; color: #fff; border: 0;
-  padding: 8px 16px; border-radius: 7px; cursor: pointer; font-size: 14px;
-  text-decoration: none; display: inline-block; }
-button:hover, .btn:hover { background: #173d4a; }
-button.ghost, .btn.ghost { background: #EAF1F3; color: #1F4E5F; }
-.small { font-size: 12.5px; color: #5a6a70; }
-.remark { background: #fff; border: 1px solid #dde3e6; border-radius: 10px;
-  padding: 10px 14px; margin-bottom: 9px; }
-.remark .when { font-size: 12px; color: #7b8a90; }
-.tag { font-size: 11px; background: #EDEFF1; border-radius: 4px;
-  padding: 0 5px; color: #555; }
-.detail { background: #fff; border: 1px solid #dde3e6; border-radius: 10px;
-  padding: 18px 20px; }
-.detail .grid { display: grid; grid-template-columns: repeat(auto-fit,
-  minmax(210px, 1fr)); gap: 10px 26px; margin-top: 8px; }
-.detail .k { font-size: 12px; color: #5a6a70; }
-.detail .v { font-size: 15px; margin-bottom: 8px; }
-.overdue td { background: #fdf1f0; }
-.empty { background: #fff; border: 1px dashed #b9c6cb; border-radius: 10px;
-  padding: 26px; text-align: center; color: #5a6a70; }
-footer { text-align: center; color: #8a979c; font-size: 12.5px;
-  padding: 0 0 26px; }
+:root { --bg:#F4F6F8; --panel:#FFFFFF; --ink:#101828; --muted:#667085;
+  --faint:#98A2B3; --line:#E4E7EC; --accent:#0F766E; --accent2:#115E59;
+  --sidebar:#0B1D26; --red:#D92D20; --amber:#B54708; --radius:14px;
+  --shadow:0 1px 2px rgba(16,24,40,.06),0 1px 3px rgba(16,24,40,.05); }
+* { box-sizing:border-box; }
+html { scrollbar-color:#C4CED4 transparent; }
+body { margin:0; font-family:-apple-system,'Segoe UI',Inter,Roboto,
+  'Helvetica Neue',Arial,sans-serif; background:var(--bg);
+  color:var(--ink); font-size:14.5px; line-height:1.45; }
+::selection { background:#99F6E4; }
+a { color:#1668B4; text-decoration:none; }
+a:hover { text-decoration:underline; }
+.sidebar { position:fixed; top:0; left:0; bottom:0; width:234px;
+  background:linear-gradient(180deg,#0B1D26,#0E2836); color:#D7E3E8;
+  display:flex; flex-direction:column; z-index:30; }
+.brand { display:flex; align-items:center; gap:11px;
+  padding:20px 18px 16px; }
+.logo { width:38px; height:38px; border-radius:11px; flex:none;
+  background:linear-gradient(135deg,#14B8A6,#0F766E); color:#fff;
+  display:flex; align-items:center; justify-content:center;
+  font-size:20px; font-weight:800; box-shadow:0 4px 14px rgba(20,184,166,.35); }
+.brand .t1 { font-size:16.5px; font-weight:700; color:#fff;
+  letter-spacing:.2px; }
+.brand .t2 { font-size:11.5px; color:#8FA6B0; }
+.sidebar nav { padding:6px 12px; flex:1; }
+.sidebar nav a { display:flex; align-items:center; gap:11px;
+  padding:9.5px 12px; margin-bottom:3px; border-radius:9px;
+  color:#B9CBD3; font-size:14.5px; position:relative; }
+.sidebar nav a:hover { background:rgba(255,255,255,.06); color:#fff;
+  text-decoration:none; }
+.sidebar nav a.active { background:rgba(20,184,166,.17); color:#fff; }
+.sidebar nav a.active::before { content:''; position:absolute; left:-12px;
+  top:8px; bottom:8px; width:3.5px; border-radius:3px;
+  background:#2DD4BF; }
+.navbadge { margin-left:auto; background:#E5484D; color:#fff;
+  font-size:11.5px; font-weight:700; border-radius:20px;
+  padding:0.5px 8px; }
+.side-foot { padding:14px 18px; border-top:1px solid rgba(255,255,255,.08);
+  font-size:12px; color:#8FA6B0; }
+.side-foot b { color:#D7E3E8; }
+.shell { margin-left:234px; min-height:100vh; display:flex;
+  flex-direction:column; }
+.topbar { position:sticky; top:0; z-index:20; height:62px;
+  background:rgba(255,255,255,.88); backdrop-filter:blur(8px);
+  border-bottom:1px solid var(--line); display:flex; align-items:center;
+  gap:16px; padding:0 26px; }
+.topbar .ptitle { font-size:16px; font-weight:650; }
+.searchbox { margin-left:auto; position:relative; }
+.searchbox svg { position:absolute; left:10px; top:50%;
+  transform:translateY(-50%); color:var(--faint); }
+.searchbox input { width:330px; padding:8.5px 12px 8.5px 34px;
+  border:1px solid var(--line); border-radius:10px; font:inherit;
+  font-size:14px; background:#F9FAFB; }
+.searchbox input:focus { outline:2px solid #99F6E4; background:#fff;
+  border-color:#5EEAD4; }
+.searchbox .kbd { position:absolute; right:9px; top:50%;
+  transform:translateY(-50%); font-size:11px; color:var(--faint);
+  border:1px solid var(--line); border-radius:5px; padding:0 5px;
+  background:#fff; }
+main { padding:24px 26px 40px; max-width:1360px; width:100%;
+  margin:0 auto; flex:1; }
+footer { text-align:center; color:var(--faint); font-size:12.5px;
+  padding:0 0 24px; }
+h1 { font-size:23px; margin:2px 0 4px; letter-spacing:-.01em; }
+h2 { font-size:16px; margin:28px 0 12px; letter-spacing:-.005em; }
+.sub { color:var(--muted); font-size:14px; }
+.btn { display:inline-flex; align-items:center; gap:7px;
+  background:var(--accent); color:#fff; border:0; padding:8.5px 16px;
+  border-radius:9px; cursor:pointer; font:inherit; font-size:14px;
+  font-weight:600; box-shadow:var(--shadow); }
+.btn:hover { background:var(--accent2); text-decoration:none; }
+.btn.ghost { background:#fff; color:var(--ink);
+  border:1px solid var(--line); box-shadow:none; }
+.btn.ghost:hover { background:#F9FAFB; }
+.btn.big { padding:12px 22px; font-size:15.5px; border-radius:11px; }
+.btn.red { background:var(--red); }
+button.btn { font-family:inherit; }
+input, select, textarea { font:inherit; font-size:14.5px;
+  padding:8px 10px; border:1px solid #CFD6DD; border-radius:9px;
+  background:#fff; color:var(--ink); }
+input:focus, select:focus, textarea:focus { outline:2px solid #99F6E4;
+  border-color:#5EEAD4; }
+.cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(170px,1fr));
+  gap:13px; margin-top:16px; }
+.kpi { background:var(--panel); border:1px solid var(--line);
+  border-radius:var(--radius); padding:16px 18px; box-shadow:var(--shadow);
+  display:flex; gap:13px; align-items:flex-start; }
+.kpi .ic { width:40px; height:40px; border-radius:11px; flex:none;
+  display:flex; align-items:center; justify-content:center; }
+.kpi .num { font-size:26px; font-weight:750; line-height:1.05; }
+.kpi .lbl { font-size:12.5px; color:var(--muted); margin-top:2px; }
+.kpi.red .num { color:var(--red); }
+.panel { background:var(--panel); border:1px solid var(--line);
+  border-radius:var(--radius); box-shadow:var(--shadow);
+  padding:18px 20px; }
+table { width:100%; border-collapse:collapse; background:var(--panel);
+  border:1px solid var(--line); border-radius:var(--radius);
+  overflow:hidden; box-shadow:var(--shadow); }
+th { text-align:left; font-size:11px; text-transform:uppercase;
+  letter-spacing:.07em; color:var(--faint); padding:11px 12px;
+  background:#FBFCFD; border-bottom:1px solid var(--line);
+  font-weight:650; }
+td { padding:10.5px 12px; border-bottom:1px solid #EEF1F4;
+  vertical-align:middle; }
+tr:last-child td { border-bottom:0; }
+tbody tr:hover td, table tr:hover td { background:#F8FAFC; }
+.name-cell { display:flex; align-items:center; gap:11px; }
+.name-cell .nm { font-weight:620; color:var(--ink); }
+.name-cell .an { font-size:12px; color:var(--muted); }
+.mono { width:36px; height:36px; border-radius:50%; flex:none;
+  display:inline-flex; align-items:center; justify-content:center;
+  font-size:13px; font-weight:700; }
+.badge { display:inline-block; min-width:23px; text-align:center;
+  padding:1.5px 7px; border-radius:20px; font-weight:700;
+  font-size:12.5px; }
+.bA { background:#DCFCE7; color:#166534; }
+.bB { background:#FEF3C7; color:#92400E; }
+.bC { background:#F1F5F9; color:#64748B; }
+.pill { display:inline-block; padding:2px 10px; border-radius:20px;
+  font-size:12.5px; font-weight:560; white-space:nowrap; }
+.st-new { background:#E0E9F7; color:#14487A; }
+.st-mid { background:#EEF1F4; color:#475467; }
+.st-hot { background:#FFEED3; color:#8A4B00; }
+.st-good { background:#D9F2E0; color:#166534; }
+.st-bad { background:#FBE3E1; color:#8C1D18; }
+.st-dead { background:#3A3A3A; color:#fff; }
+.chip { display:inline-block; padding:1.5px 8px; border-radius:20px;
+  font-size:12px; font-weight:600; white-space:nowrap; }
+.chip-red { background:#FDECEA; color:#B42318; }
+.chip-amber { background:#FEF3C7; color:#92400E; }
+.chip-gray { background:#EEF1F4; color:#475467; }
+.filters { background:var(--panel); border:1px solid var(--line);
+  border-radius:var(--radius); box-shadow:var(--shadow);
+  padding:13px 15px; display:flex; gap:11px; flex-wrap:wrap;
+  align-items:end; margin:14px 0; }
+.filters label { font-size:11.5px; color:var(--muted); display:block;
+  margin-bottom:4px; font-weight:600; text-transform:uppercase;
+  letter-spacing:.05em; }
+.funnel-row { display:flex; align-items:center; gap:12px;
+  padding:5.5px 0; }
+.funnel-row .fl { width:178px; flex:none; }
+.funnel-row .ft { flex:1; background:#EEF1F4; border-radius:8px;
+  height:15px; overflow:hidden; }
+.funnel-row .fb { height:100%; border-radius:8px;
+  background:linear-gradient(90deg,#14B8A6,#0F766E); min-width:3px; }
+.funnel-row .fb.good { background:linear-gradient(90deg,#4ADE80,#16A34A); }
+.funnel-row .fb.bad { background:#D0D5DD; }
+.funnel-row .fc { width:38px; text-align:right; font-weight:650; }
+.taskcard { display:flex; align-items:center; gap:13px;
+  background:var(--panel); border:1px solid var(--line);
+  border-left:4px solid var(--red); border-radius:12px;
+  padding:11px 15px; margin-bottom:9px; box-shadow:var(--shadow); }
+.taskcard.amber { border-left-color:#F79009; }
+.taskcard .grow { flex:1; min-width:0; }
+.empty { background:var(--panel); border:1.5px dashed #CBD5DC;
+  border-radius:var(--radius); padding:30px; text-align:center;
+  color:var(--muted); }
+.remark { background:var(--panel); border:1px solid var(--line);
+  border-radius:12px; padding:12px 15px; margin-bottom:9px;
+  box-shadow:var(--shadow); }
+.remark .when { font-size:12px; color:var(--faint); margin-bottom:3px; }
+.event { text-align:center; color:var(--muted); font-size:12.5px;
+  padding:5px 0 9px; }
+.tag { font-size:11px; background:#EEF1F4; border-radius:5px;
+  padding:0.5px 6px; color:#475467; font-weight:600; }
+.small { font-size:12.5px; color:var(--muted); }
+.board { display:flex; gap:12px; overflow-x:auto; padding:4px 2px 16px;
+  align-items:flex-start; }
+.col { width:252px; min-width:252px; background:#EBEEF1;
+  border-radius:var(--radius); padding:10px; }
+.col.drop { outline:2.5px dashed var(--accent); outline-offset:-2px; }
+.col h3 { margin:2px 4px 10px; font-size:13px; display:flex;
+  align-items:center; gap:8px; color:#344054; font-weight:650; }
+.col .cnt { background:#fff; border-radius:12px; padding:0.5px 8px;
+  font-size:12px; color:var(--muted); }
+.dcard { background:#fff; border-radius:11px; padding:11px 12px;
+  margin-bottom:9px; box-shadow:var(--shadow); cursor:grab;
+  border:1px solid #E7EBEE; }
+.dcard:active { cursor:grabbing; }
+.dcard .nm { font-weight:630; display:flex; gap:8px;
+  align-items:center; }
+.dcard .meta { display:flex; gap:6px; flex-wrap:wrap;
+  margin-top:8px; align-items:center; }
+.progress { height:7px; background:#E4E7EC; border-radius:6px;
+  overflow:hidden; }
+.progress div { height:100%; background:linear-gradient(90deg,#14B8A6,#0F766E); }
+.callwrap { max-width:660px; margin:0 auto; }
+.callcard { background:var(--panel); border:1px solid var(--line);
+  border-radius:18px; box-shadow:0 8px 28px rgba(16,24,40,.09);
+  padding:26px 28px; }
+.outcomes { display:grid; grid-template-columns:1fr 1fr; gap:9px;
+  margin-top:14px; }
+.outcomes form { margin:0; }
+.outcomes button { width:100%; }
+.detail-grid { display:grid; grid-template-columns:305px 1fr 300px;
+  gap:16px; align-items:start; }
+.detail-grid .k { font-size:11.5px; color:var(--muted);
+  text-transform:uppercase; letter-spacing:.05em; font-weight:600; }
+.detail-grid .v { font-size:15px; margin:2px 0 13px; }
+.crumbs { font-size:13px; color:var(--muted); margin-bottom:8px; }
+@media (max-width:1080px) { .detail-grid { grid-template-columns:1fr; }
+  .searchbox input { width:200px; } }
 """
 
 
-def page(title, body, alert=None):
-    bar = ""
-    if alert:
-        cls, text = alert
-        bar = f'<div class="alertbar {cls}">{text}</div>'
+def page(title, active, body, conn=None):
+    badge = ""
+    if conn is not None:
+        overdue, due_today, _ = due_leads(conn)
+        n = len(overdue) + len(due_today)
+        if n:
+            badge = f'<span class="navbadge">{n}</span>'
+    total = ""
+    if conn is not None:
+        c = conn.execute("SELECT COUNT(*) c FROM leads").fetchone()["c"]
+        total = f"<b>{c}</b> leads in the database"
+
+    def nav(key, href, ic, label, extra=""):
+        cls = ' class="active"' if active == key else ""
+        return (f'<a href="{href}"{cls}>{icon(ic)}'
+                f'<span>{label}</span>{extra}</a>')
+
     return f"""<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{esc(title)} - Vaani CRM</title><style>{CSS}</style></head>
 <body>
-<header><span class="brand">Vaani CRM</span>
-<nav><a href="/">Dashboard</a><a href="/leads">All leads</a>
-<a href="/followups">Follow-ups</a><a href="/export.csv">Export CSV</a>
-</nav></header>
-{bar}
-<main>{body}</main>
-<footer>Vaani CRM v{VERSION} - runs only on this computer. Your data
-never leaves this PC.</footer>
+<aside class="sidebar">
+  <div class="brand"><div class="logo">V</div>
+    <div><div class="t1">Vaani CRM</div>
+    <div class="t2">Lead manager</div></div></div>
+  <nav>
+    {nav("dashboard", "/", "grid", "Dashboard")}
+    {nav("call", "/call", "phone", "Call Mode")}
+    {nav("board", "/board", "board", "Pipeline")}
+    {nav("leads", "/leads", "users", "All Leads")}
+    {nav("followups", "/followups", "clock", "Follow-ups", badge)}
+    {nav("export", "/export.csv", "download", "Export CSV")}
+  </nav>
+  <div class="side-foot">{total}<br>Vaani CRM v{VERSION}<br>
+  Data stays on this PC</div>
+</aside>
+<div class="shell">
+  <div class="topbar"><span class="ptitle">{esc(title)}</span>
+    <form class="searchbox" method="get" action="/leads">
+      {icon("search", 15)}
+      <input id="globalsearch" name="q" placeholder="Search leads...">
+      <span class="kbd">Ctrl K</span>
+    </form>
+  </div>
+  <main>{body}</main>
+  <footer>Vaani CRM v{VERSION} - runs only on this computer. Your data
+  never leaves this PC.</footer>
+</div>
+<script>
+document.addEventListener('keydown', function(e) {{
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {{
+    e.preventDefault();
+    document.getElementById('globalsearch').focus();
+  }}
+}});
+</script>
 </body></html>"""
 
 
@@ -535,65 +795,47 @@ def status_options(selected):
     return "".join(out)
 
 
-def alert_for(conn):
-    overdue, due_today, _ = due_leads(conn)
-    if overdue:
-        return ("", f"&#9888; {len(overdue)} follow-up(s) OVERDUE and "
-                    f"{len(due_today)} due today - open Follow-ups and "
-                    "clear them first.")
-    if due_today:
-        return ("", f"{len(due_today)} follow-up(s) due today - open "
-                    "Follow-ups to see who to call.")
-    return None
+def greeting():
+    h = datetime.now().hour
+    if h < 12:
+        return "Good morning"
+    if h < 17:
+        return "Good afternoon"
+    return "Good evening"
 
 
-def due_row(r, show_date=True):
-    late = ""
-    if r["followup"]:
-        d = (date.today() - date.fromisoformat(r["followup"])).days
-        if d > 0:
-            late = f' <span class="pill st-bad">{d}d late</span>'
-    datecell = fmt_date(r["followup"]) + late if show_date else ""
+def task_card(r, kind="overdue"):
+    style = ""
+    cls = "taskcard"
+    if kind == "today":
+        cls += " amber"
+    elif kind == "later":
+        style = ' style="border-left-color:#D0D5DD"'
     return (
-        f'<tr><td><a href="/lead?phone={esc(r["phone"])}">'
-        f'<b>{esc(r["name"])}</b></a><div class="small">'
-        f'{esc(r["angle"] or "")}</div></td>'
-        f'<td>{fmt_phone(r["phone"])}</td>'
-        f'<td>{datecell}</td>'
-        f'<td>{tier_badge(r["tier"])} {esc(r["score"] or "")}</td>'
-        f'<td>{status_pill(r["status"])}</td></tr>')
-
-
-def lead_row(r, next_url):
-    remark = esc((r["last_remark"] or "")[:64])
-    if r["n_remarks"]:
-        remark += f' <span class="small">({r["n_remarks"]})</span>'
-    return (
-        f'<tr><td><a href="/lead?phone={esc(r["phone"])}">'
-        f'<b>{esc(r["name"])}</b></a><div class="small">'
-        f'{esc(r["angle"] or "")}</div></td>'
-        f'<td>{fmt_phone(r["phone"])}</td>'
-        f'<td class="small">{esc((r["address"] or "")[:58])}</td>'
-        f'<td>{tier_badge(r["tier"])} {esc(r["score"] or "")}</td>'
-        f'<td><form method="post" action="/update" style="margin:0">'
-        f'<input type="hidden" name="phone" value="{esc(r["phone"])}">'
-        f'<input type="hidden" name="followup" '
-        f'value="{esc(r["followup"])}">'
-        f'<input type="hidden" name="next" value="{esc(next_url)}">'
-        f'<select name="status" onchange="this.form.submit()">'
-        f'{status_options(r["status"])}</select></form></td>'
-        f'<td>{fmt_date(r["followup"])}</td>'
-        f'<td class="small">{remark}</td>'
-        f'<td class="small">{esc(r["times_seen"] or 1)}x</td></tr>')
+        f'<div class="{cls}"{style}>{monogram(r["name"], r["phone"])}'
+        f'<div class="grow"><a href="/lead?phone={esc(r["phone"])}">'
+        f'<b>{esc(r["name"])}</b></a> '
+        f'<span class="small">{fmt_phone(r["phone"])}</span><br>'
+        f'{followup_chip(r)} {tier_badge(r["tier"])} '
+        f'<span class="small">Score {esc(r["score"] or "-")} - '
+        f'{esc(r["angle"] or "")}</span></div>'
+        f'{status_pill(r["status"])}'
+        f'<a class="btn ghost" href="/lead?phone={esc(r["phone"])}">'
+        f'Open</a></div>')
 
 
 def dashboard_html(conn):
     total = conn.execute("SELECT COUNT(*) c FROM leads").fetchone()["c"]
+    date_line = datetime.now().strftime("%A, %d %B %Y")
+    head = (f"<h1>{greeting()}, {esc(USER_NAME)}</h1>"
+            f'<div class="sub">{date_line} - here is where your '
+            f'leads stand.</div>')
     if total == 0:
-        return ("<h1>Dashboard</h1><div class='empty'>No leads yet.<br>"
-                "Run Vaani once (double-click <b>run-vaani.bat</b>) and "
-                "every restaurant it scrapes will appear here "
-                "automatically.</div>")
+        return head + (
+            '<div class="empty" style="margin-top:18px">No leads '
+            'yet.<br>Run Vaani once (double-click <b>run-vaani.bat'
+            '</b>) and every restaurant it scrapes will appear here '
+            'automatically.</div>')
     tier_a = conn.execute(
         "SELECT COUNT(*) c FROM leads WHERE tier = 'A'").fetchone()["c"]
     counts = {}
@@ -605,53 +847,93 @@ def dashboard_html(conn):
     demos = counts.get("Demo booked", 0) + counts.get("Demo done", 0)
     won = counts.get("Won", 0)
     overdue, due_today, _ = due_leads(conn)
-    cards = (
-        f'<div class="cards">'
-        f'<div class="card"><div class="num">{total}</div>'
-        f'<div class="lbl">Total leads</div></div>'
-        f'<div class="card"><div class="num">{tier_a}</div>'
-        f'<div class="lbl">A-tier (call today)</div></div>'
-        f'<div class="card"><div class="num">{len(due_today)}</div>'
-        f'<div class="lbl">Follow-ups due today</div></div>'
-        f'<div class="card red"><div class="num">{len(overdue)}</div>'
-        f'<div class="lbl">Overdue follow-ups</div></div>'
-        f'<div class="card"><div class="num">{demos}</div>'
-        f'<div class="lbl">Demos booked / done</div></div>'
-        f'<div class="card"><div class="num">{won}</div>'
-        f'<div class="lbl">Won</div></div></div>')
-    body = "<h1>Dashboard</h1>" + cards
+
+    def kpi(ic, bg, fg, num, lbl, red=False):
+        return (f'<div class="kpi{" red" if red else ""}">'
+                f'<div class="ic" style="background:{bg};color:{fg}">'
+                f'{icon(ic, 20)}</div><div><div class="num">{num}'
+                f'</div><div class="lbl">{lbl}</div></div></div>')
+
+    cards = ('<div class="cards">'
+             + kpi("users", "#E0E9F7", "#14487A", total, "Total leads")
+             + kpi("flame", "#DCFCE7", "#166534", tier_a,
+                   "A-tier - call today")
+             + kpi("calendar", "#FEF3C7", "#92400E", len(due_today),
+                   "Follow-ups due today")
+             + kpi("clock", "#FDECEA", "#B42318", len(overdue),
+                   "Overdue follow-ups", red=bool(overdue))
+             + kpi("phone", "#CCFBF1", "#0F766E", demos,
+                   "Demos booked / done")
+             + kpi("check", "#DCFCE7", "#166534", won, "Won")
+             + '</div>')
+    body = head + cards
     if overdue:
-        rows = "".join(due_row(r) for r in overdue)
-        body += (f"<h2>Overdue follow-ups ({len(overdue)})</h2>"
-                 f"<table><tr><th>Restaurant</th><th>Phone</th>"
-                 f"<th>Follow-up</th><th>Tier / Score</th>"
-                 f"<th>Status</th></tr>{rows}</table>")
+        body += f"<h2>Overdue - clear these first ({len(overdue)})</h2>"
+        body += "".join(task_card(r, "overdue") for r in overdue)
     if due_today:
-        rows = "".join(due_row(r) for r in due_today)
-        body += (f"<h2>Due today ({len(due_today)})</h2>"
-                 f"<table><tr><th>Restaurant</th><th>Phone</th>"
-                 f"<th>Follow-up</th><th>Tier / Score</th>"
-                 f"<th>Status</th></tr>{rows}</table>")
+        body += f"<h2>Due today ({len(due_today)})</h2>"
+        body += "".join(task_card(r, "today") for r in due_today)
     if not overdue and not due_today:
-        body += ('<div class="empty" style="margin-top:18px">No '
+        body += ('<div class="empty" style="margin-top:20px">No '
                  'follow-ups due. Set a follow-up date on any lead '
                  'and it will appear here on the day.</div>')
-    funnel = "".join(
-        f"<tr><td>{status_pill(s)}</td><td>{counts.get(s, 0)}</td></tr>"
-        for s in STATUSES if counts.get(s, 0))
-    body += (f"<h2>Your funnel</h2><table style='max-width:420px'>"
-             f"<tr><th>Status</th><th>Leads</th></tr>{funnel}</table>")
+    maxc = max(counts.values()) if counts else 1
+    rows = ""
+    for s in STATUSES:
+        c = counts.get(s, 0)
+        if not c:
+            continue
+        bar_cls = "fb"
+        if s == "Won":
+            bar_cls += " good"
+        elif s in ("Lost", "Not interested", "Wrong number",
+                   "Do not contact"):
+            bar_cls += " bad"
+        rows += (f'<div class="funnel-row"><div class="fl">'
+                 f'{status_pill(s)}</div><div class="ft">'
+                 f'<div class="{bar_cls}" style="width:'
+                 f'{max(3, round(c * 100 / maxc))}%"></div></div>'
+                 f'<div class="fc">{c}</div></div>')
+    body += (f'<h2>Your funnel</h2><div class="panel">{rows}</div>')
     recents = conn.execute(
         "SELECT r.*, l.name FROM crm_remarks r JOIN leads l"
-        " ON l.phone = r.phone ORDER BY r.id DESC LIMIT 8").fetchall()
+        " ON l.phone = r.phone WHERE r.source != 'status'"
+        " ORDER BY r.id DESC LIMIT 6").fetchall()
     if recents:
         items = "".join(
             f'<div class="remark"><div class="when">'
             f'{esc(r["ts"][:10])} - <a href="/lead?phone='
             f'{esc(r["phone"])}">{esc(r["name"])}</a></div>'
-            f'{esc(r["text"][:160])}</div>' for r in recents)
+            f'{esc(r["text"][:170])}</div>' for r in recents)
         body += f"<h2>Latest remarks</h2>{items}"
     return body
+
+
+def lead_row(r, next_url):
+    remark = esc((r["last_remark"] or "")[:60])
+    if r["n_remarks"]:
+        remark += f' <span class="small">({r["n_remarks"]})</span>'
+    fu = followup_chip(r) or fmt_date(r["followup"])
+    return (
+        f'<tr><td><div class="name-cell">'
+        f'{monogram(r["name"], r["phone"])}<div>'
+        f'<a class="nm" href="/lead?phone={esc(r["phone"])}">'
+        f'{esc(r["name"])}</a><div class="an">'
+        f'{esc(r["angle"] or "")}</div></div></div></td>'
+        f'<td>{fmt_phone(r["phone"])}</td>'
+        f'<td class="small">{esc((r["address"] or "")[:54])}</td>'
+        f'<td>{tier_badge(r["tier"])} <b>{esc(r["score"] or "-")}</b></td>'
+        f'<td><form method="post" action="/update" style="margin:0">'
+        f'<input type="hidden" name="phone" value="{esc(r["phone"])}">'
+        f'<input type="hidden" name="followup" '
+        f'value="{esc(r["followup"])}">'
+        f'<input type="hidden" name="next" value="{esc(next_url)}">'
+        f'<select name="status" onchange="this.form.submit()" '
+        f'style="padding:5.5px 7px;font-size:13.5px">'
+        f'{status_options(r["status"])}</select></form></td>'
+        f'<td>{fu}</td>'
+        f'<td class="small">{remark}</td>'
+        f'<td class="small">{esc(r["times_seen"] or 1)}x</td></tr>')
 
 
 def leads_html(conn, params):
@@ -672,24 +954,27 @@ def leads_html(conn, params):
         f'<option value="{esc(s)}"{" selected" if status == s else ""}>'
         f'{esc(s)}</option>' for s in STATUSES)
     sort_opts = "".join(
-        f'<option value="{v}"{" selected" if sort == v else ""}>'
+        f'<option value="{v}"{" selected" if sort == v else ""}">'
         f'{lbl}</option>'
         for v, lbl in (("score", "Best score first"),
                        ("followup", "Follow-up date"),
                        ("recent", "Recently seen"),
                        ("name", "Name")))
-    body = f"""<h1>All leads ({len(rows)})</h1>
+    body = f"""<h1>All leads</h1>
+<div class="sub">{len(rows)} lead(s) shown - the pipeline board and
+this list always agree.</div>
 <form class="filters" method="get" action="/leads">
-<div><label>Search name / phone / area / email</label>
-<input name="q" value="{esc(q)}" size="30"></div>
+<div><label>Search</label>
+<input name="q" value="{esc(q)}" size="28"
+placeholder="Name, phone, area, email"></div>
 <div><label>Tier</label><select name="tier">{tier_opts}</select></div>
 <div><label>Status</label><select name="status">{status_opts}</select></div>
 <div><label>Sort</label><select name="sort">{sort_opts}</select></div>
-<div><button type="submit">Filter</button>
+<div><button class="btn" type="submit">Filter</button>
 <a class="btn ghost" href="/leads">Clear</a></div></form>"""
     if not rows:
-        body += ('<div class="empty">No leads match. Clear the filters, '
-                 'or run Vaani to scrape more.</div>')
+        body += ('<div class="empty">No leads match. Clear the '
+                 'filters, or run Vaani to scrape more.</div>')
         return body
     trs = "".join(lead_row(r, next_url) for r in rows)
     body += (f"<table><tr><th>Restaurant</th><th>Phone</th>"
@@ -703,33 +988,8 @@ def lead_html(conn, lead):
     phone = lead["phone"]
     remarks = fetch_remarks(conn, phone)
     wa = f"https://wa.me/91{phone}" if len(str(phone)) == 10 else "#"
-    grid = (
-        f'<div><div class="k">Phone</div><div class="v">'
-        f'{fmt_phone(phone)} &nbsp;<a class="btn ghost" '
-        f'href="tel:+91{esc(phone)}">Call</a> '
-        f'<a class="btn ghost" href="{wa}" target="_blank">WhatsApp</a>'
-        f'</div></div>'
-        f'<div><div class="k">Email</div><div class="v">'
-        f'{esc(lead["email"] or "-")}</div></div>'
-        f'<div><div class="k">Location</div><div class="v">'
-        f'{esc(lead["address"] or "-")}</div></div>'
-        f'<div><div class="k">Website</div><div class="v">'
-        + (f'<a href="{esc(lead["website"])}" target="_blank">'
-           f'{esc(lead["website"])}</a>' if lead["website"] else "-")
-        + f'</div></div>'
-        f'<div><div class="k">Rating / Reviews</div><div class="v">'
-        f'{esc(lead["rating"] or "-")} / {esc(lead["reviews"] or "-")}'
-        f'</div></div>'
-        f'<div><div class="k">Score / Tier</div><div class="v">'
-        f'{tier_badge(lead["tier"])} {esc(lead["score"] or "-")}</div>'
-        f'</div>'
-        f'<div><div class="k">Pitch angle</div><div class="v">'
-        f'{esc(lead["angle"] or "-")}</div></div>'
-        f'<div><div class="k">First seen / Last seen / Times seen</div>'
-        f'<div class="v">{fmt_date(lead["first_seen"])} / '
-        f'{fmt_date(lead["last_seen"])} / {esc(lead["times_seen"] or 1)}'
-        f'</div></div>')
-    thread = ""
+    timeline = ""
+    n_notes = 0
     for r in remarks:
         when = r["ts"]
         try:
@@ -737,36 +997,79 @@ def lead_html(conn, lead):
                 "%d %b %Y, %I:%M %p")
         except Exception:
             pass
+        if r["source"] == "status":
+            timeline += (f'<div class="event">&#9679; '
+                         f'{esc(r["text"])}<br>'
+                         f'<span class="small">{esc(when)}</span></div>')
+            continue
+        n_notes += 1
         tag = (' <span class="tag">from tracker</span>'
                if r["source"] == "tracker" else "")
-        thread += (f'<div class="remark"><div class="when">{esc(when)}'
-                   f'{tag}</div>{esc(r["text"]).replace(chr(10), "<br>")}'
-                   f'</div>')
-    if not thread:
-        thread = '<div class="empty">No remarks yet.</div>'
-    body = f"""<h1>{esc(lead['name'])}</h1>
-<div class="detail"><div class="grid">{grid}</div>
-<h2>Status &amp; follow-up</h2>
-<form method="post" action="/update">
-<input type="hidden" name="phone" value="{esc(phone)}">
-<input type="hidden" name="next" value="/lead?phone={esc(phone)}">
-<select name="status">{status_options(lead['status'])}</select>
-<input type="date" id="fu" name="followup" value="{esc(lead['followup'])}">
-<button type="button" class="ghost" onclick="setFU(1)">Tomorrow</button>
-<button type="button" class="ghost" onclick="setFU(3)">+3 days</button>
-<button type="button" class="ghost" onclick="setFU(7)">+1 week</button>
-<button type="button" class="ghost" onclick="clearFU()">No date</button>
-<button type="submit">Save</button></form>
-<div class="small" style="margin-top:6px">Current status:
-{status_pill(lead['status'])} &nbsp; Follow-up:
-{fmt_date(lead['followup']) or 'not set'}</div></div>
-<h2>Remarks ({len(remarks)})</h2>
-<form method="post" action="/remark" style="margin-bottom:14px">
-<input type="hidden" name="phone" value="{esc(phone)}">
-<textarea name="text" rows="3" style="width:100%"
-placeholder="What happened on the call? Who did you speak to? What did they say?"></textarea>
-<br><button type="submit">Add remark</button></form>
-{thread}
+        timeline += (
+            f'<div class="remark"><div class="when">{esc(when)}{tag}'
+            f'</div>{esc(r["text"]).replace(chr(10), "<br>")}</div>')
+    if not remarks:
+        timeline = '<div class="empty">Nothing here yet. Add the ' \
+                   'first remark after your call.</div>'
+    supp = ""
+    if lead["suppressed"]:
+        supp = (f'<div class="v" style="color:#B42318">Kept out of '
+                f'Vaani results ({esc(lead["suppress_reason"] or "")})'
+                f'</div>')
+    body = f"""<div class="crumbs"><a href="/leads">All Leads</a> /
+{esc(lead['name'])}</div>
+<h1>{esc(lead['name'])}</h1>
+<div class="sub">{status_pill(lead['status'])} &nbsp;{followup_chip(lead)}</div>
+<div class="detail-grid" style="margin-top:16px">
+<div class="panel">
+  <div class="k">Phone</div><div class="v">{fmt_phone(phone)}</div>
+  <div class="k">Email</div><div class="v">{esc(lead['email'] or '-')}</div>
+  <div class="k">Location</div><div class="v">{esc(lead['address'] or '-')}</div>
+  <div class="k">Website</div><div class="v">"""
+    body += (f'<a href="{esc(lead["website"])}" target="_blank">'
+             f'{esc(lead["website"])}</a>' if lead["website"] else "-")
+    body += f"""</div>
+  <div class="k">Rating / Reviews</div>
+  <div class="v">{esc(lead['rating'] or '-')} / {esc(lead['reviews'] or '-')}</div>
+  <div class="k">Score / Tier</div>
+  <div class="v">{tier_badge(lead['tier'])} <b>{esc(lead['score'] or '-')}</b></div>
+  <div class="k">Pitch angle</div><div class="v">{esc(lead['angle'] or '-')}</div>
+  <div class="k">First seen / Last seen / Times seen</div>
+  <div class="v">{fmt_date(lead['first_seen'])} / {fmt_date(lead['last_seen'])} / {esc(lead['times_seen'] or 1)}</div>
+  {supp}
+</div>
+<div>
+  <form method="post" action="/remark" style="margin-bottom:13px">
+    <input type="hidden" name="phone" value="{esc(phone)}">
+    <textarea name="text" rows="3" style="width:100%"
+    placeholder="Add a remark - what happened on the call? Who did you speak to?"></textarea>
+    <div style="margin-top:7px"><button class="btn" type="submit">Add remark</button></div>
+  </form>
+  {timeline}
+</div>
+<div class="panel">
+  <h2 style="margin-top:0">Next step</h2>
+  <div style="display:flex;gap:8px;margin-bottom:14px">
+    <a class="btn big" style="flex:1;justify-content:center" href="tel:+91{esc(phone)}">Call</a>
+    <a class="btn ghost big" style="flex:1;justify-content:center" href="{wa}" target="_blank">WhatsApp</a>
+  </div>
+  <form method="post" action="/update">
+    <input type="hidden" name="phone" value="{esc(phone)}">
+    <input type="hidden" name="next" value="/lead?phone={esc(phone)}">
+    <div class="k">Status</div>
+    <select name="status" style="width:100%;margin:4px 0 12px">{status_options(lead['status'])}</select>
+    <div class="k">Follow-up date</div>
+    <input type="date" id="fu" name="followup" value="{esc(lead['followup'])}" style="width:100%;margin:4px 0 9px">
+    <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:13px">
+      <button type="button" class="btn ghost" onclick="setFU(1)">Tomorrow</button>
+      <button type="button" class="btn ghost" onclick="setFU(3)">+3 days</button>
+      <button type="button" class="btn ghost" onclick="setFU(7)">+1 week</button>
+      <button type="button" class="btn ghost" onclick="clearFU()">No date</button>
+    </div>
+    <button class="btn" type="submit" style="width:100%;justify-content:center">Save</button>
+  </form>
+</div>
+</div>
 <script>
 function setFU(days){{var d=new Date(); d.setDate(d.getDate()+days);
  var m=('0'+(d.getMonth()+1)).slice(-2), dd=('0'+d.getDate()).slice(-2);
@@ -784,24 +1087,190 @@ def followups_html(conn):
     later = [r for r in upcoming
              if (date.fromisoformat(r["followup"])
                  - date.today()).days > 7]
-
-    def section(title, rows, cls=""):
-        if not rows:
-            return ""
-        trs = "".join(due_row(r) for r in rows)
-        return (f"<h2>{title} ({len(rows)})</h2><table class='{cls}'>"
-                f"<tr><th>Restaurant</th><th>Phone</th><th>Follow-up</th>"
-                f"<th>Tier / Score</th><th>Status</th></tr>{trs}</table>")
-
-    body = "<h1>Follow-ups</h1>"
-    body += section("Overdue - call these first", overdue, "overdue")
-    body += section("Due today", due_today)
-    body += section("Coming this week", week)
-    body += section("Later", later)
+    body = ("<h1>Follow-ups</h1><div class='sub'>Every lead with a "
+            "date, in the order to work them.</div>")
+    if overdue:
+        body += f"<h2>Overdue ({len(overdue)})</h2>" + "".join(
+            task_card(r, "overdue") for r in overdue)
+    if due_today:
+        body += f"<h2>Due today ({len(due_today)})</h2>" + "".join(
+            task_card(r, "today") for r in due_today)
+    if week:
+        body += f"<h2>Coming this week ({len(week)})</h2>" + "".join(
+            task_card(r, "later") for r in week)
+    if later:
+        body += f"<h2>Later ({len(later)})</h2>" + "".join(
+            task_card(r, "later") for r in later)
     if not (overdue or due_today or upcoming):
-        body += ('<div class="empty">No follow-ups set. Open any lead '
-                 'and set a follow-up date - it will show up here on '
-                 'the day.</div>')
+        body += ('<div class="empty" style="margin-top:16px">No '
+                 'follow-ups set. Open any lead and set a follow-up '
+                 'date - it shows up here on the day.</div>')
+    return body
+
+
+def board_html(conn):
+    rows = fetch_leads(conn)
+    by_status = {s: [] for s in STATUSES}
+    for r in rows:
+        by_status[r["status"]].append(r)
+    cols = ""
+    for s in STATUSES:
+        cards = ""
+        for r in by_status[s]:
+            cards += (
+                f'<div class="dcard" draggable="true" '
+                f'data-phone="{esc(r["phone"])}">'
+                f'<div class="nm">{esc(r["name"])}</div>'
+                f'<div class="meta">{tier_badge(r["tier"])}'
+                f'<span class="chip chip-gray">Score '
+                f'{esc(r["score"] or "-")}</span>'
+                f'{followup_chip(r)}</div>'
+                f'<div class="small" style="margin-top:6px">'
+                f'{fmt_phone(r["phone"])} - '
+                f'{esc((r["address"] or "")[:34])}</div></div>')
+        if not cards:
+            cards = '<div class="small" style="padding:2px 4px">' \
+                    'No leads here</div>'
+        cols += (f'<div class="col" data-status="{esc(s)}">'
+                 f'<h3>{esc(s)}<span class="cnt">'
+                 f'{len(by_status[s])}</span></h3>{cards}</div>')
+    body = f"""<h1>Pipeline</h1>
+<div class="sub">Your whole funnel on one board - drag a card to a new
+stage and it saves instantly. This board and All Leads always agree.</div>
+<div class="board" style="margin-top:14px">{cols}</div>
+<script>
+document.querySelectorAll('.dcard').forEach(function(c) {{
+  c.addEventListener('dragstart', function(e) {{
+    e.dataTransfer.setData('text/plain', c.dataset.phone);
+  }});
+}});
+document.querySelectorAll('.col').forEach(function(col) {{
+  col.addEventListener('dragover', function(e) {{
+    e.preventDefault(); col.classList.add('drop');
+  }});
+  col.addEventListener('dragleave', function() {{
+    col.classList.remove('drop');
+  }});
+  col.addEventListener('drop', function(e) {{
+    e.preventDefault(); col.classList.remove('drop');
+    var phone = e.dataTransfer.getData('text/plain');
+    var card = document.querySelector(
+      '.dcard[data-phone="' + phone + '"]');
+    if (!card || card.parentElement === col) return;
+    var body = new URLSearchParams();
+    body.set('phone', phone);
+    body.set('status', col.dataset.status);
+    fetch('/api/update', {{method: 'POST', body: body}})
+      .then(function(r) {{ return r.json(); }})
+      .then(function(j) {{
+        if (j.ok) {{
+          col.appendChild(card);
+          document.querySelectorAll('.col').forEach(function(c2) {{
+            c2.querySelector('.cnt').textContent =
+              c2.querySelectorAll('.dcard').length;
+          }});
+        }}
+      }});
+  }});
+}});
+</script>"""
+    return body
+
+
+def call_html(conn, pos):
+    queue = call_queue(conn)
+    total = len(queue)
+    head = "<h1>Call Mode</h1>"
+    if total == 0:
+        return head + (
+            '<div class="empty" style="margin-top:16px">Queue '
+            'clear - nothing overdue, nothing due today, and no '
+            'fresh A or B leads left uncalled.<br>Run Vaani to '
+            'scrape a new area and this fills up again.</div>')
+    if pos >= total:
+        return head + (
+            f'<div class="empty" style="margin-top:16px">You '
+            f'reached the end of today\'s queue ({total} lead(s)).'
+            f'<br><br><a class="btn" href="/">Back to Dashboard</a> '
+            f'<a class="btn ghost" href="/call">Start again</a></div>')
+    pos = max(0, pos)
+    lead = queue[pos]
+    phone = lead["phone"]
+    today = date.today()
+    if lead["followup"] and lead["followup"] < today.isoformat():
+        why = "Overdue follow-up"
+    elif lead["followup"] == today.isoformat():
+        why = "Follow-up due today"
+    else:
+        why = f'Fresh {esc(lead["tier"])}-tier lead'
+    pct = round(pos * 100 / total)
+    recent = [r for r in fetch_remarks(conn, phone)
+              if r["source"] != "status"][:3]
+    notes = "".join(
+        f'<div class="remark"><div class="when">{esc(r["ts"][:10])}'
+        f'</div>{esc(r["text"][:220])}</div>' for r in recent)
+    if not notes:
+        notes = '<div class="small">No remarks yet on this lead.</div>'
+    wa = f"https://wa.me/91{phone}" if len(str(phone)) == 10 else "#"
+    nxt = f"/call?pos={pos}"
+    d1 = (today + timedelta(days=1)).isoformat()
+    d2 = (today + timedelta(days=2)).isoformat()
+
+    def outcome(label, status, fu, cls="btn ghost", style=""):
+        return (
+            f'<form method="post" action="/update">'
+            f'<input type="hidden" name="phone" value="{esc(phone)}">'
+            f'<input type="hidden" name="status" value="{esc(status)}">'
+            f'<input type="hidden" name="followup" value="{fu}">'
+            f'<input type="hidden" name="next" value="{nxt}">'
+            f'<button class="{cls}" type="submit" style="{style}">'
+            f'{label}</button></form>')
+
+    body = f"""{head}
+<div class="sub">Working today's queue - {why.lower()} first, then
+fresh A and B leads.</div>
+<div class="callwrap" style="margin-top:16px">
+<div class="small" style="display:flex;justify-content:space-between">
+<span><b>Lead {pos + 1} of {total}</b></span>
+<a href="/call?pos={pos + 1}">Skip this lead &#8594;</a></div>
+<div class="progress" style="margin:7px 0 14px"><div style="width:{pct}%"></div></div>
+<div class="callcard">
+  <div style="display:flex;gap:14px;align-items:center">
+    {monogram(lead['name'], phone)}
+    <div><div style="font-size:21px;font-weight:720">{esc(lead['name'])}</div>
+    <div class="small">{esc(lead['address'] or '')}</div></div>
+  </div>
+  <div style="margin:13px 0;display:flex;gap:7px;flex-wrap:wrap">
+    {tier_badge(lead['tier'])}
+    <span class="chip chip-gray">Score {esc(lead['score'] or '-')}</span>
+    <span class="chip chip-gray">{esc(lead['angle'] or '')}</span>
+    {status_pill(lead['status'])} {followup_chip(lead)}
+    <span class="chip chip-amber">{why}</span>
+  </div>
+  <div style="font-size:19px;font-weight:650;letter-spacing:.02em">{fmt_phone(phone)}</div>
+  <div style="display:flex;gap:9px;margin:14px 0">
+    <a class="btn big" style="flex:1;justify-content:center" href="tel:+91{esc(phone)}">Call now</a>
+    <a class="btn ghost big" style="flex:1;justify-content:center" href="{wa}" target="_blank">WhatsApp</a>
+  </div>
+  <div class="small" style="margin-bottom:5px"><b>Last remarks</b></div>
+  {notes}
+  <form method="post" action="/remark" style="margin-top:10px">
+    <input type="hidden" name="phone" value="{esc(phone)}">
+    <input type="hidden" name="next" value="{nxt}">
+    <textarea name="text" rows="2" style="width:100%" placeholder="Quick remark about this call..."></textarea>
+    <div style="margin-top:6px"><button class="btn ghost" type="submit">Add remark</button>
+    <a class="small" href="/lead?phone={esc(phone)}">Open full lead page</a></div>
+  </form>
+  <h2 style="margin:18px 0 4px">How did it go?</h2>
+  <div class="outcomes">
+    {outcome('No answer - retry tomorrow', 'No answer', d1)}
+    {outcome('Callback - in 2 days', 'Callback', d2)}
+    {outcome('Interested', 'Interested', '', 'btn')}
+    {outcome('Demo booked', 'Demo booked', '', 'btn')}
+    {outcome('Not interested', 'Not interested', '', 'btn ghost', 'color:#B42318')}
+    {outcome('Wrong number', 'Wrong number', '', 'btn ghost', 'color:#B42318')}
+  </div>
+</div></div>"""
     return body
 
 
@@ -840,6 +1309,11 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def _json(self, obj):
+        import json
+        self._send(200, json.dumps(obj),
+                   ctype="application/json; charset=utf-8")
+
     def _redirect(self, to):
         if not to or not to.startswith("/") or to.startswith("//"):
             to = "/"
@@ -855,26 +1329,36 @@ class Handler(BaseHTTPRequestHandler):
         conn = get_conn()
         try:
             if parsed.path == "/":
-                self._send(200, page("Dashboard", dashboard_html(conn),
-                                     alert=alert_for(conn)))
+                self._send(200, page("Dashboard", "dashboard",
+                                     dashboard_html(conn), conn))
+            elif parsed.path == "/call":
+                try:
+                    pos = int(params.get("pos", 0))
+                except Exception:
+                    pos = 0
+                self._send(200, page("Call Mode", "call",
+                                     call_html(conn, pos), conn))
+            elif parsed.path == "/board":
+                self._send(200, page("Pipeline", "board",
+                                     board_html(conn), conn))
             elif parsed.path == "/leads":
-                self._send(200, page("All leads",
-                                     leads_html(conn, params)))
+                self._send(200, page("All Leads", "leads",
+                                     leads_html(conn, params), conn))
             elif parsed.path == "/lead":
                 lead = fetch_lead(conn, params.get("phone", ""))
                 if not lead:
                     self._send(404, page(
-                        "Not found",
+                        "Not found", "",
                         "<h1>Lead not found</h1><div class='empty'>"
                         "That lead is not in the database. "
-                        "<a href='/leads'>Back to all leads</a></div>"))
+                        "<a href='/leads'>Back to all leads</a></div>",
+                        conn))
                 else:
-                    self._send(200, page(lead["name"] or "Lead",
-                                         lead_html(conn, lead)))
+                    self._send(200, page(lead["name"] or "Lead", "leads",
+                                         lead_html(conn, lead), conn))
             elif parsed.path == "/followups":
-                self._send(200, page("Follow-ups",
-                                     followups_html(conn),
-                                     alert=alert_for(conn)))
+                self._send(200, page("Follow-ups", "followups",
+                                     followups_html(conn), conn))
             elif parsed.path == "/export.csv":
                 self._send(200, export_csv_text(conn),
                            ctype="text/csv; charset=utf-8",
@@ -882,8 +1366,8 @@ class Handler(BaseHTTPRequestHandler):
                                   'attachment; filename='
                                   '"vaani-crm-export.csv"'})
             else:
-                self._send(404, page("Not found",
-                                     "<h1>Page not found</h1>"))
+                self._send(404, page("Not found", "",
+                                     "<h1>Page not found</h1>", conn))
         finally:
             conn.close()
 
@@ -901,7 +1385,15 @@ class Handler(BaseHTTPRequestHandler):
                 urllib.parse.parse_qs(raw).items()}
         conn = get_conn()
         try:
-            if parsed.path == "/update":
+            if parsed.path == "/api/update":
+                phone = form.get("phone", "")
+                ok = False
+                if fetch_lead(conn, phone):
+                    ok = set_status(conn, phone,
+                                    form.get("status", ""),
+                                    form.get("followup"))
+                self._json({"ok": bool(ok)})
+            elif parsed.path == "/update":
                 phone = form.get("phone", "")
                 if fetch_lead(conn, phone):
                     set_status(conn, phone, form.get("status", ""),
@@ -912,10 +1404,11 @@ class Handler(BaseHTTPRequestHandler):
                 phone = form.get("phone", "")
                 if fetch_lead(conn, phone):
                     add_remark(conn, phone, form.get("text", ""))
-                self._redirect(f"/lead?phone={phone}")
+                self._redirect(form.get("next") or
+                               f"/lead?phone={phone}")
             else:
-                self._send(404, page("Not found",
-                                     "<h1>Page not found</h1>"))
+                self._send(404, page("Not found", "",
+                                     "<h1>Page not found</h1>", conn))
         finally:
             conn.close()
 
