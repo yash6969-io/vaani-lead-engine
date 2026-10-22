@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Vaani Lead Engine v3.7
+Vaani Lead Engine v3.8
 ======================
 Type a location (even a small area like "Gota, Ahmedabad") and get 4 lead
 databases about restaurants there:
@@ -35,7 +35,7 @@ import sqlite3
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
-VERSION = "3.7.0"
+VERSION = "3.8.0"
 UPDATE_URL = ("https://raw.githubusercontent.com/yash6969-io/"
               "vaani-lead-engine/main/vaani.py")
 
@@ -786,6 +786,52 @@ def master_upsert(lead):
         pass
 
 
+def _crm_state():
+    """Statuses set in the Vaani CRM app (its crm_state table), if
+    the CRM has been used on this PC. For any phone the CRM knows,
+    the CRM's word is final - the tracker no longer overrides it."""
+    try:
+        db = _master()
+        has = db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table'"
+            " AND name = 'crm_state'").fetchone()
+        if not has:
+            db.close()
+            return {}
+        rows = db.execute(
+            "SELECT phone, status FROM crm_state").fetchall()
+        db.close()
+        return {r[0]: r[1] for r in rows}
+    except Exception:
+        return {}
+
+
+def sync_suppressions(tracker_outcomes):
+    """Merge the tracker's outcomes (and the CRM's, which win) into
+    the master database, and return every phone that must stay out
+    of this run's outputs."""
+    crm_state = _crm_state()
+    for k, info in tracker_outcomes.items():
+        if k in crm_state:
+            continue  # the CRM owns this lead now
+        if info["outcome"] in SUPPRESS_OUTCOMES:
+            master_suppress(k, info["outcome"])
+        else:
+            master_unsuppress(k)
+    for k, status in crm_state.items():
+        if status in SUPPRESS_OUTCOMES:
+            master_suppress(k, status)
+        else:
+            master_unsuppress(k)
+    out = master_suppressed()
+    out |= {k for k, info in tracker_outcomes.items()
+            if info["outcome"] in SUPPRESS_OUTCOMES
+            and k not in crm_state}
+    out |= {k for k, s in crm_state.items()
+            if s in SUPPRESS_OUTCOMES}
+    return out
+
+
 def read_tracker_outcomes():
     """The user's latest word on every phone in the tracker:
     phone -> {outcome, name, location, email, notes}. Sheets are
@@ -847,7 +893,7 @@ def _pretty_date(iso_text):
         return iso_text or ""
 
 
-def export_winback(tracker_outcomes):
+def export_winback(tracker_outcomes, crm_owned=frozenset()):
     """(Re)build vaani-not-interested.xlsx - every lead the user has
     marked Not interested, kept in one file so they can be contacted
     again later (a win-back list). Do Not Contact leads stay out
@@ -870,6 +916,9 @@ def export_winback(tracker_outcomes):
     except Exception:
         pass
     for key, info in tracker_outcomes.items():
+        if key in crm_owned:
+            continue  # the CRM's status for this lead is in the
+            # database rows above - the tracker has no say anymore
         if info.get("outcome") != "Not interested":
             # the tracker has the final word - if the outcome changed
             # (Do Not Contact, or Interested again), the lead leaves
@@ -1328,16 +1377,12 @@ def main():
 
     # the tracker is the user's latest word: sync its outcomes into
     # the master database first (marking someone Interested again
-    # un-marks them), then drop everything suppressed from the outputs
+    # un-marks them), then drop everything suppressed from the
+    # outputs. Leads the Vaani CRM has a status for are owned by the
+    # CRM - sync_suppressions lets the CRM win over the tracker.
     tracker_outcomes = read_tracker_outcomes()
-    for k, info in tracker_outcomes.items():
-        if info["outcome"] in SUPPRESS_OUTCOMES:
-            master_suppress(k, info["outcome"])
-        else:
-            master_unsuppress(k)
-    suppressed_phones = master_suppressed() | {
-        k for k, info in tracker_outcomes.items()
-        if info["outcome"] in SUPPRESS_OUTCOMES}
+    crm_owned = set(_crm_state())
+    suppressed_phones = sync_suppressions(tracker_outcomes)
     kept, suppressed_n = [], 0
     for lead in leads:
         if _phone_keys(lead["phone"]) & suppressed_phones:
@@ -1348,7 +1393,7 @@ def main():
 
     if not leads:
         if suppressed_n:
-            wb_n = export_winback(tracker_outcomes)
+            wb_n = export_winback(tracker_outcomes, crm_owned)
             msg = (
                 "\n  Every lead from this search is already in your "
                 "tracker marked\n  Not interested / Wrong number / Do "
@@ -1385,7 +1430,7 @@ def main():
     for lead in leads:
         master_upsert(lead)
     tracker_result = update_tracker(leads)
-    winback_n = export_winback(tracker_outcomes)
+    winback_n = export_winback(tracker_outcomes, crm_owned)
 
     # ---- summary -----------------------------------------------------------
     print("\n  DONE")
