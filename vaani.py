@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Vaani Lead Engine v3.6
+Vaani Lead Engine v3.7
 ======================
 Type a location (even a small area like "Gota, Ahmedabad") and get 4 lead
 databases about restaurants there:
@@ -35,7 +35,7 @@ import sqlite3
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
-VERSION = "3.6.0"
+VERSION = "3.7.0"
 UPDATE_URL = ("https://raw.githubusercontent.com/yash6969-io/"
               "vaani-lead-engine/main/vaani.py")
 
@@ -702,6 +702,10 @@ def _master():
         tier TEXT, angle TEXT, first_seen TEXT, last_seen TEXT,
         times_seen INTEGER DEFAULT 1, suppressed INTEGER DEFAULT 0,
         suppress_reason TEXT)""")
+    cols = [r[1] for r in db.execute("PRAGMA table_info(leads)")]
+    if "suppressed_on" not in cols:
+        db.execute("ALTER TABLE leads ADD COLUMN suppressed_on TEXT")
+        db.commit()
     return db
 
 
@@ -728,13 +732,28 @@ def master_suppressed():
 def master_suppress(phone_key, reason):
     try:
         db = _master()
+        today = date.today().isoformat()
         db.execute(
             "INSERT INTO leads (phone, suppressed, suppress_reason,"
-            " first_seen, last_seen) VALUES (?, 1, ?, ?, ?)"
+            " suppressed_on, first_seen, last_seen)"
+            " VALUES (?, 1, ?, ?, ?, ?)"
             " ON CONFLICT(phone) DO UPDATE SET suppressed = 1,"
-            " suppress_reason = excluded.suppress_reason",
-            (phone_key, reason, date.today().isoformat(),
-             date.today().isoformat()))
+            " suppress_reason = excluded.suppress_reason,"
+            " suppressed_on = COALESCE(leads.suppressed_on,"
+            " excluded.suppressed_on)",
+            (phone_key, reason, today, today, today))
+        db.commit()
+        db.close()
+    except Exception:
+        pass
+
+
+def master_unsuppress(phone_key):
+    try:
+        db = _master()
+        db.execute(
+            "UPDATE leads SET suppressed = 0, suppress_reason = NULL,"
+            " suppressed_on = NULL WHERE phone = ?", (phone_key,))
         db.commit()
         db.close()
     except Exception:
@@ -767,14 +786,16 @@ def master_upsert(lead):
         pass
 
 
-def read_tracker_suppressions():
-    """Phones the user has marked Not interested / Wrong number /
-    Do not contact anywhere in the tracker - they never come back."""
+def read_tracker_outcomes():
+    """The user's latest word on every phone in the tracker:
+    phone -> {outcome, name, location, email, notes}. Sheets are
+    read in order, so a newer sheet's outcome overrides an older
+    one - marking someone Interested again un-marks them."""
     path = os.path.join(HERE, TRACKER_NAME)
     if not os.path.exists(path) or not ensure_openpyxl():
-        return set()
+        return {}
     import openpyxl
-    out = set()
+    out = {}
     try:
         wb = openpyxl.load_workbook(path, read_only=True)
         for ws in wb.worksheets:
@@ -783,20 +804,128 @@ def read_tracker_suppressions():
             headers = {}
             for c in range(1, (ws.max_column or 0) + 1):
                 v = ws.cell(row=1, column=c).value
-                if v in ("Phone", "Outcome") and v not in headers:
-                    headers[v] = c  # first match wins (summary reuses
-                    # the word "Outcome" further right)
+                if v in ("Phone", "Outcome", "Restaurant name",
+                         "Location", "Email", "Notes") \
+                        and v not in headers:
+                    headers[v] = c  # first match wins (the summary
+                    # block reuses the word "Outcome" further right)
             if "Phone" not in headers or "Outcome" not in headers:
                 continue
             for r in range(2, (ws.max_row or 0) + 1):
-                if ws.cell(row=r, column=headers["Outcome"]).value \
-                        in SUPPRESS_OUTCOMES:
-                    out |= _phone_keys(
-                        ws.cell(row=r, column=headers["Phone"]).value)
+                outcome = ws.cell(row=r,
+                                  column=headers["Outcome"]).value
+                if not outcome:
+                    continue
+                keys = _phone_keys(
+                    ws.cell(row=r, column=headers["Phone"]).value)
+                if not keys:
+                    continue
+                info = {"outcome": outcome}
+                for field, col in (("name", "Restaurant name"),
+                                   ("location", "Location"),
+                                   ("email", "Email"),
+                                   ("notes", "Notes")):
+                    if col in headers:
+                        info[field] = ws.cell(
+                            row=r, column=headers[col]).value or ""
+                for k in keys:
+                    out[k] = dict(info)
         wb.close()
     except Exception:
-        return set()
+        return {}
     return out
+
+
+WINBACK_NAME = "vaani-not-interested.xlsx"
+
+
+def _pretty_date(iso_text):
+    try:
+        return date.fromisoformat(str(iso_text)[:10]).strftime(
+            "%d %b %Y")
+    except Exception:
+        return iso_text or ""
+
+
+def export_winback(tracker_outcomes):
+    """(Re)build vaani-not-interested.xlsx - every lead the user has
+    marked Not interested, kept in one file so they can be contacted
+    again later (a win-back list). Do Not Contact leads stay out
+    forever and Wrong Number leads are dead numbers, so neither is
+    ever included here."""
+    merged = {}
+    try:
+        db = _master()
+        rows = db.execute(
+            "SELECT phone, name, address, email, score, tier, angle,"
+            " suppressed_on, last_seen FROM leads WHERE suppressed = 1"
+            " AND suppress_reason = 'Not interested'").fetchall()
+        db.close()
+        for r in rows:
+            merged[r[0]] = {
+                "name": r[1] or "", "location": r[2] or "",
+                "email": r[3] or "", "score": r[4], "tier": r[5] or "",
+                "angle": r[6] or "",
+                "marked": _pretty_date(r[7] or r[8]), "notes": ""}
+    except Exception:
+        pass
+    for key, info in tracker_outcomes.items():
+        if info.get("outcome") != "Not interested":
+            # the tracker has the final word - if the outcome changed
+            # (Do Not Contact, or Interested again), the lead leaves
+            # the win-back list too
+            merged.pop(key, None)
+            continue
+        row = merged.setdefault(key, {
+            "name": "", "location": "", "email": "", "score": None,
+            "tier": "", "angle": "", "marked": "", "notes": ""})
+        for f in ("name", "location", "email", "notes"):
+            if info.get(f):
+                row[f] = info[f]
+    path = os.path.join(HERE, WINBACK_NAME)
+    if not merged and not os.path.exists(path):
+        return 0
+    if not ensure_openpyxl():
+        return 0
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Not interested"
+    head_fill = PatternFill("solid", fgColor="1F4E5F")
+    head_font = Font(bold=True, color="FFFFFF", size=12)
+    for c, h in enumerate(["Restaurant Name", "Phone", "Location",
+                           "Email ID", "Score", "Tier", "Pitch Angle",
+                           "Marked Not Interested On", "Notes",
+                           "Win-back Notes"], 1):
+        cell = ws.cell(row=1, column=c, value=h)
+        cell.fill = head_fill
+        cell.font = head_font
+        cell.alignment = Alignment(vertical="center")
+    ordered = sorted(
+        merged.items(),
+        key=lambda kv: (-(kv[1]["score"] or 0), kv[1]["name"]))
+    for r, (phone, row) in enumerate(ordered, 2):
+        ws.cell(row=r, column=1, value=row["name"])
+        ws.cell(row=r, column=2, value=phone)
+        ws.cell(row=r, column=3, value=row["location"])
+        ws.cell(row=r, column=4, value=row["email"])
+        ws.cell(row=r, column=5, value=row["score"])
+        ws.cell(row=r, column=6, value=row["tier"])
+        ws.cell(row=r, column=7, value=row["angle"])
+        ws.cell(row=r, column=8, value=row["marked"])
+        ws.cell(row=r, column=9, value=row["notes"])
+    widths = [38, 14, 55, 34, 7, 6, 24, 16, 50, 40]
+    for i, w_ in enumerate(widths, 1):
+        ws.column_dimensions[chr(64 + i)].width = w_
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = ws.dimensions
+    ws.row_dimensions[1].height = 26
+    try:
+        wb.save(path)
+    except Exception:
+        return 0
+    return len(merged)
 
 
 def scrape(location, category, max_results, want_email, headless):
@@ -1197,24 +1326,39 @@ def main():
                       "score": sc, "tier": tier, "angle": angle,
                       "why": "; ".join(reasons[:4])})
 
-    suppressed_phones = master_suppressed() | read_tracker_suppressions()
+    # the tracker is the user's latest word: sync its outcomes into
+    # the master database first (marking someone Interested again
+    # un-marks them), then drop everything suppressed from the outputs
+    tracker_outcomes = read_tracker_outcomes()
+    for k, info in tracker_outcomes.items():
+        if info["outcome"] in SUPPRESS_OUTCOMES:
+            master_suppress(k, info["outcome"])
+        else:
+            master_unsuppress(k)
+    suppressed_phones = master_suppressed() | {
+        k for k, info in tracker_outcomes.items()
+        if info["outcome"] in SUPPRESS_OUTCOMES}
     kept, suppressed_n = [], 0
     for lead in leads:
-        hit = _phone_keys(lead["phone"]) & suppressed_phones
-        if hit:
+        if _phone_keys(lead["phone"]) & suppressed_phones:
             suppressed_n += 1
-            for k in hit:
-                master_suppress(k, "marked in tracker")
             continue
         kept.append(lead)
     leads = kept
 
     if not leads:
         if suppressed_n:
-            sys.exit(
+            wb_n = export_winback(tracker_outcomes)
+            msg = (
                 "\n  Every lead from this search is already in your "
-                "tracker marked\n  Not interested / Wrong number / Do not "
-                "contact - nothing new to save.\n")
+                "tracker marked\n  Not interested / Wrong number / Do "
+                "not contact - nothing new to save.\n")
+            if wb_n:
+                msg += (
+                    f"  Your Not interested leads are safe in "
+                    f"{WINBACK_NAME} ({wb_n} lead(s)) - your win-back "
+                    "list.\n")
+            sys.exit(msg)
         sys.exit(
             f"\n  Found {len(rows)} places, but none of them had a mobile "
             "number\n  (landlines don't count). Nothing was saved - try a "
@@ -1241,6 +1385,7 @@ def main():
     for lead in leads:
         master_upsert(lead)
     tracker_result = update_tracker(leads)
+    winback_n = export_winback(tracker_outcomes)
 
     # ---- summary -----------------------------------------------------------
     print("\n  DONE")
@@ -1252,6 +1397,9 @@ def main():
     if suppressed_n:
         print(f"  Left out - already marked    : {suppressed_n} "
               "(Not interested / Wrong number / Do not contact)")
+    if winback_n:
+        print(f"  Win-back list                : {winback_n} Not "
+              f"interested lead(s) safe in {WINBACK_NAME}")
     print(f"  Email IDs                    : {len(emails)}")
     tiers = {"A": 0, "B": 0, "C": 0}
     for l in leads:
