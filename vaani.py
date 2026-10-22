@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Vaani Lead Engine v3.5
+Vaani Lead Engine v3.6
 ======================
 Type a location (even a small area like "Gota, Ahmedabad") and get 4 lead
 databases about restaurants there:
@@ -31,10 +31,11 @@ import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date
+import sqlite3
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
-VERSION = "3.5.0"
+VERSION = "3.6.0"
 UPDATE_URL = ("https://raw.githubusercontent.com/yash6969-io/"
               "vaani-lead-engine/main/vaani.py")
 
@@ -427,6 +428,32 @@ def extract_phone(page):
     return fallback
 
 
+def extract_rating_reviews(page):
+    """Rating + review count from the place header. Verified structure:
+    aria-label="4.8 stars" and aria-label="714 reviews" (the review
+    breakdown rows use a different format, so these patterns are safe)."""
+    rating, reviews = None, 0
+    try:
+        html = page.content()
+    except Exception:
+        return rating, reviews
+    m = re.search(r'aria-label="(\d\.\d) stars"', html)
+    if m:
+        rating = float(m.group(1))
+    m = re.search(r'aria-label="([\d,]+) reviews"', html)
+    if m:
+        reviews = int(m.group(1).replace(",", ""))
+    return rating, reviews
+
+
+def panel_text(page):
+    try:
+        return page.locator('div[role="main"]').first.inner_text(
+            timeout=4000)
+    except Exception:
+        return ""
+
+
 def extract_place(page, url):
     """Read one restaurant's Maps page: name, address, phone, website."""
     goto_retry(page, url)
@@ -456,20 +483,40 @@ def extract_place(page, url):
         website = w.get_attribute("href") or ""
     except Exception:
         pass
+    rating, reviews = extract_rating_reviews(page)
+    ptext = panel_text(page)
+    low = ptext.lower()
+    services = {k: (k in ptext)
+                for k in ("Dine-in", "Takeaway", "Delivery")}
     return {
         "name": text_of(page.locator("h1")),
         "address": clean_field(
             text_of(page.locator('button[data-item-id="address"]'))),
         "phone": extract_phone(page),
         "website": website,
+        "rating": rating,
+        "reviews": reviews,
+        "category": text_of(page.locator('button[jsaction*="category"]')),
+        "hours": clean_field(
+            text_of(page.locator('[data-item-id="oh"]'))),
+        "closed": ("permanently closed" in low
+                   or "temporarily closed" in low),
+        "services": services,
     }
 
 
-def fetch_emails(website):
-    """Look for an email on the business's own website (home + contact)."""
+def fetch_site_info(website):
+    """Everything useful from the business's own website, in one pass:
+    emails, aggregator links (Zomato/Swiggy), direct-ordering capability,
+    social links, WhatsApp, contact form, growth and call-heavy signals,
+    and a proprietor/owner name ONLY if the site itself states one."""
+    info = {"emails": [], "aggregators": [], "ordering": False,
+            "socials": [], "whatsapp": False, "form": False,
+            "growth": False, "call_heavy": False, "owner": ""}
     if not website or "google." in website:
-        return []
+        return info
     base = website.rstrip("/")
+    pages = []
     for url in (website, base + "/contact", base + "/contact-us"):
         try:
             req = urllib.request.Request(
@@ -478,10 +525,278 @@ def fetch_emails(website):
                 html = resp.read(300000).decode("utf-8", "replace")
         except Exception:
             continue
-        found = split_emails(html)
-        if found:
-            return found
-    return []
+        pages.append(html)
+        if not info["emails"]:
+            info["emails"] = split_emails(html)
+        if info["emails"] and len(pages) > 1:
+            break
+    if not pages:
+        return info
+    blob = "\n".join(pages)
+    low = blob.lower()
+    for h in re.findall(r'href="([^"]+)"', blob):
+        hl = h.lower()
+        if "zomato.com" in hl and "Zomato" not in info["aggregators"]:
+            info["aggregators"].append("Zomato")
+        if "swiggy.com" in hl and "Swiggy" not in info["aggregators"]:
+            info["aggregators"].append("Swiggy")
+        if "instagram.com" in hl and "Instagram" not in info["socials"]:
+            info["socials"].append("Instagram")
+        if "facebook.com" in hl and "Facebook" not in info["socials"]:
+            info["socials"].append("Facebook")
+        if "wa.me" in hl or "api.whatsapp.com" in hl:
+            info["whatsapp"] = True
+        if ("order" in hl and "zomato" not in hl and "swiggy" not in hl):
+            info["ordering"] = True
+    if "add to cart" in low or "checkout" in low:
+        info["ordering"] = True
+    info["form"] = "<form" in low
+    plain = re.sub(r"<[^>]+>", " ", blob)
+    info["growth"] = bool(re.search(
+        r"franchise|our outlets|our locations|multiple locations",
+        plain, re.I))
+    info["call_heavy"] = bool(re.search(
+        r"banquet|reserve a table|reservations|bulk orders|catering|"
+        r"party orders", plain, re.I))
+    m = re.search(r"(?:proprietor|owner)\s*[:\-\u2013]\s*"
+                  r"([A-Z][a-z]+(?: [A-Z][a-z]+){0,2})", plain, re.I)
+    if m:
+        info["owner"] = m.group(1)
+    return info
+
+
+def fetch_emails(website):
+    """Backwards-compatible wrapper: just the emails from a site."""
+    return fetch_site_info(website)["emails"]
+
+
+# ---------------------------------------------------------------- scoring
+# Book My Food Phase 1 rubric (100 points, every point shows its evidence).
+# The bands are starting estimates - they get recalibrated against real
+# demo outcomes from the tracker, not treated as facts.
+
+KNOWN_CHAINS = ("mcdonald", "domino", "pizza hut", "kfc", "burger king",
+                "subway", "starbucks", "haldiram", "barbeque nation",
+                "wow momo", "wow! momo", "la pino", "baskin", "cafe coffee",
+                "jumbo king", "behrouz", "faasos", "freshmenu",
+                "oven story", "chaayos", "third wave", "burger singh")
+
+
+def score_lead(r):
+    """Score one scraped place. Returns (score, tier, reasons, angle).
+    Reasons are short evidence strings, best first - they land in the
+    tracker so the caller sees WHY this lead ranks where it does."""
+    web = r.get("web") or {}
+    scored = []  # (points, reason)
+
+    def add(pts, reason):
+        if pts:
+            scored.append((pts, reason))
+
+    # Contactability - 20
+    if split_phones(r.get("phone")):
+        add(8, "Mobile number")
+    if r.get("emails"):
+        add(5, "Email found")
+    if r.get("website"):
+        add(4, "Has website")
+    if web.get("socials"):
+        add(3, "On " + "/".join(web["socials"]))
+    contact = min(20, sum(x for x, _ in scored))
+    # Activity - 20
+    act = []
+    rev = r.get("reviews") or 0
+    if rev >= 500:
+        act.append((8, f"{rev} reviews"))
+    elif rev >= 200:
+        act.append((6, f"{rev} reviews"))
+    elif rev >= 50:
+        act.append((4, f"{rev} reviews"))
+    elif rev >= 10:
+        act.append((2, f"{rev} reviews"))
+    rating = r.get("rating")
+    if rating:
+        if 3.5 <= rating <= 4.7:
+            act.append((6, f"Rated {rating}"))
+        elif rating > 4.7:
+            act.append((4, f"Rated {rating}"))
+        elif rating >= 3.0:
+            act.append((2, f"Rated {rating}"))
+    if r.get("hours"):
+        act.append((3, "Hours listed"))
+    svcs = r.get("services") or {}
+    if any(svcs.values()):
+        act.append((3, "Services listed"))
+    activity = min(20, sum(x for x, _ in act))
+    scored += act
+    # Product fit - 30
+    fit = []
+    if svcs.get("Delivery") and svcs.get("Takeaway"):
+        fit.append((10, "Delivery + takeaway"))
+    elif svcs.get("Delivery") or svcs.get("Takeaway"):
+        fit.append((5, "Delivery or takeaway"))
+    aggs = web.get("aggregators") or []
+    if aggs:
+        fit.append((10, "On " + "/".join(aggs)))
+    if not web.get("ordering"):
+        fit.append((10, "No direct ordering found"))
+    fit_pts = min(30, sum(x for x, _ in fit))
+    scored += fit
+    # Pain - 20
+    pain = []
+    if aggs and not web.get("ordering"):
+        pain.append((10, "Aggregator-dependent, no direct channel"))
+    if not r.get("website"):
+        pain.append((5, "No website"))
+    elif not (r.get("emails") or web.get("form") or web.get("socials")):
+        pain.append((2, "Thin website - no email, form or social"))
+    if not web.get("ordering") and not aggs:
+        pain.append((5, "No online ordering - manual/phone orders"))
+    pain_pts = min(20, sum(x for x, _ in pain))
+    scored += pain
+    # Access / timing - 10
+    acc = []
+    name_low = (r.get("name") or "").lower()
+    if not any(c in name_low for c in KNOWN_CHAINS):
+        acc.append((5, "Independent / small group"))
+    if web.get("growth"):
+        acc.append((5, "Expansion / franchise signals"))
+    acc_pts = min(10, sum(x for x, _ in acc))
+    scored += acc
+
+    total = contact + activity + fit_pts + pain_pts + acc_pts
+    tier = "A" if total >= 75 else "B" if total >= 50 else "C"
+    reasons = [t for _, t in sorted(scored, key=lambda x: -x[0])]
+    if aggs and not web.get("ordering"):
+        angle = "Aggregator-dependent"
+    elif web.get("growth"):
+        angle = "Growing business"
+    elif not r.get("website"):
+        angle = "Digitally weak - no website"
+    elif web.get("call_heavy"):
+        angle = "Call-heavy (reservations/banquets)"
+    elif rating and rating >= 4.5 and rev >= 300:
+        angle = "Reputation-active"
+    elif not web.get("ordering"):
+        angle = "No direct ordering"
+    else:
+        angle = "Operations upgrade"
+    return total, tier, reasons, angle
+
+
+# ---------------------------------------------------------------- master DB
+# One persistent record per business (SQLite, free, built into Python).
+# Excel stays the calling interface; this is the memory underneath it -
+# it stops the same restaurant being scraped and called as "new" forever,
+# and it remembers who must never be contacted again.
+
+MASTER_DB = "vaani_master.db"
+SUPPRESS_OUTCOMES = {"Not interested", "Wrong number", "Do not contact"}
+
+
+def _master():
+    db = sqlite3.connect(os.path.join(HERE, MASTER_DB))
+    db.execute("""CREATE TABLE IF NOT EXISTS leads (
+        phone TEXT PRIMARY KEY, name TEXT, address TEXT, website TEXT,
+        email TEXT, rating REAL, reviews INTEGER, score INTEGER,
+        tier TEXT, angle TEXT, first_seen TEXT, last_seen TEXT,
+        times_seen INTEGER DEFAULT 1, suppressed INTEGER DEFAULT 0,
+        suppress_reason TEXT)""")
+    return db
+
+
+def _phone_keys(phone_field):
+    keys = set()
+    for part in re.split(r"[,;/|]", str(phone_field or "")):
+        d = re.sub(r"\D", "", part)
+        if len(d) >= 10:
+            keys.add(d[-10:])
+    return keys
+
+
+def master_suppressed():
+    try:
+        db = _master()
+        rows = db.execute(
+            "SELECT phone FROM leads WHERE suppressed = 1").fetchall()
+        db.close()
+        return {r[0] for r in rows}
+    except Exception:
+        return set()
+
+
+def master_suppress(phone_key, reason):
+    try:
+        db = _master()
+        db.execute(
+            "INSERT INTO leads (phone, suppressed, suppress_reason,"
+            " first_seen, last_seen) VALUES (?, 1, ?, ?, ?)"
+            " ON CONFLICT(phone) DO UPDATE SET suppressed = 1,"
+            " suppress_reason = excluded.suppress_reason",
+            (phone_key, reason, date.today().isoformat(),
+             date.today().isoformat()))
+        db.commit()
+        db.close()
+    except Exception:
+        pass
+
+
+def master_upsert(lead):
+    try:
+        db = _master()
+        today = date.today().isoformat()
+        for key in _phone_keys(lead["phone"]):
+            db.execute(
+                "INSERT INTO leads (phone, name, address, website, email,"
+                " rating, reviews, score, tier, angle, first_seen,"
+                " last_seen, times_seen) VALUES (?,?,?,?,?,?,?,?,?,?,?,"
+                "?,1) ON CONFLICT(phone) DO UPDATE SET name ="
+                " excluded.name, address = excluded.address, website ="
+                " excluded.website, email = excluded.email, rating ="
+                " excluded.rating, reviews = excluded.reviews, score ="
+                " excluded.score, tier = excluded.tier, angle ="
+                " excluded.angle, last_seen = excluded.last_seen,"
+                " times_seen = leads.times_seen + 1",
+                (key, lead["name"], lead["location"], lead.get("website"),
+                 lead["email"], lead.get("rating"), lead.get("reviews"),
+                 lead.get("score"), lead.get("tier"), lead.get("angle"),
+                 today, today))
+        db.commit()
+        db.close()
+    except Exception:
+        pass
+
+
+def read_tracker_suppressions():
+    """Phones the user has marked Not interested / Wrong number /
+    Do not contact anywhere in the tracker - they never come back."""
+    path = os.path.join(HERE, TRACKER_NAME)
+    if not os.path.exists(path) or not ensure_openpyxl():
+        return set()
+    import openpyxl
+    out = set()
+    try:
+        wb = openpyxl.load_workbook(path, read_only=True)
+        for ws in wb.worksheets:
+            if ws.title == "How to use":
+                continue
+            headers = {}
+            for c in range(1, (ws.max_column or 0) + 1):
+                v = ws.cell(row=1, column=c).value
+                if v in ("Phone", "Outcome") and v not in headers:
+                    headers[v] = c  # first match wins (summary reuses
+                    # the word "Outcome" further right)
+            if "Phone" not in headers or "Outcome" not in headers:
+                continue
+            for r in range(2, (ws.max_row or 0) + 1):
+                if ws.cell(row=r, column=headers["Outcome"]).value \
+                        in SUPPRESS_OUTCOMES:
+                    out |= _phone_keys(
+                        ws.cell(row=r, column=headers["Phone"]).value)
+        wb.close()
+    except Exception:
+        return set()
+    return out
 
 
 def scrape(location, category, max_results, want_email, headless):
@@ -533,9 +848,12 @@ def scrape(location, category, max_results, want_email, headless):
                     except Exception:
                         pass
                 d["emails"] = []  # websites are checked after, in parallel
+                d["web"] = {}
                 results.append(d)
                 mob = split_phones(d["phone"])
                 line = f"  [{i}/{len(links)}] {d['name'][:44]}"
+                if d.get("rating"):
+                    line += f"  - {d['rating']}* ({d.get('reviews', 0)} reviews)"
                 line += f"  - mobile {mob[0]}" if mob else "  - no mobile"
                 if d["emails"]:
                     line += f"  - {d['emails'][0]}"
@@ -547,10 +865,11 @@ def scrape(location, category, max_results, want_email, headless):
                     print(f"\n  checking {len(sites)} restaurant websites "
                           "for email IDs (several at a time)...")
                     with ThreadPoolExecutor(max_workers=6) as ex:
-                        for r, em in zip(sites, ex.map(
-                                lambda x: fetch_emails(x["website"]),
+                        for r, inf in zip(sites, ex.map(
+                                lambda x: fetch_site_info(x["website"]),
                                 sites)):
-                            r["emails"] = em
+                            r["web"] = inf
+                            r["emails"] = inf["emails"]
                     got = sum(1 for r in sites if r["emails"])
                     print(f"  email IDs found for {got} of {len(sites)} "
                           "places")
@@ -613,17 +932,26 @@ def write_excel(path, leads):
     head_fill = PatternFill("solid", fgColor="1F4E5F")
     head_font = Font(bold=True, color="FFFFFF", size=12)
     for c, h in enumerate(["Restaurant Name", "Location",
-                           "Phone Number", "Email ID"], 1):
+                           "Phone Number", "Email ID", "Score", "Tier",
+                           "Pitch Angle", "Rating", "Reviews",
+                           "Why this lead"], 1):
         cell = ws.cell(row=1, column=c, value=h)
         cell.fill = head_fill
         cell.font = head_font
         cell.alignment = Alignment(vertical="center")
-    for r, lead in enumerate(leads, 2):
+    for r, lead in enumerate(
+            sorted(leads, key=lambda x: -(x.get("score") or 0)), 2):
         ws.cell(row=r, column=1, value=lead["name"])
         ws.cell(row=r, column=2, value=lead["location"])
         ws.cell(row=r, column=3, value=lead["phone"])
         ws.cell(row=r, column=4, value=lead["email"])
-    widths = [38, 55, 16, 34]
+        ws.cell(row=r, column=5, value=lead.get("score"))
+        ws.cell(row=r, column=6, value=lead.get("tier"))
+        ws.cell(row=r, column=7, value=lead.get("angle"))
+        ws.cell(row=r, column=8, value=lead.get("rating"))
+        ws.cell(row=r, column=9, value=lead.get("reviews"))
+        ws.cell(row=r, column=10, value=lead.get("why"))
+    widths = [38, 55, 16, 34, 7, 6, 24, 8, 9, 60]
     for i, w_ in enumerate(widths, 1):
         ws.column_dimensions[chr(64 + i)].width = w_
     ws.freeze_panes = "A2"
@@ -635,54 +963,97 @@ def write_excel(path, leads):
 TRACKER_NAME = "vaani-call-tracker.xlsx"
 OUTCOMES = ("Not called,No answer,Interested,Callback,"
             "Deck sent,Not interested,Wrong number")
+FUNNEL_OUTCOMES = ("Not called,No answer,Staff reached,"
+                   "Decision-maker reached,Conversation,Interested,"
+                   "Demo booked,Demo done,Deck sent,Callback,"
+                   "Not interested,Wrong number,Do not contact,Won,Lost")
+SUMMARY_OUTCOMES = ["Not called", "No answer", "Interested", "Callback",
+                    "Demo booked", "Demo done", "Won", "Not interested"]
+TRACKER_HEADERS = ["#", "Restaurant name", "Phone", "Location", "Email",
+                   "Score", "Tier", "Pitch angle", "Why this lead",
+                   "Outcome", "Callback date", "Notes"]
 
 
 def _style_tracker_sheet(ws, last_row):
-    """Give a fresh sheet the call tracker's layout: violet headers, the
-    outcome summary on the right, and the Outcome dropdown in column F."""
+    """The v3.6 tracker layout: lead columns A-L (with Score, Tier,
+    Pitch angle and Why), the outcome summary at N/O, and the sales
+    funnel as the Outcome dropdown in column J."""
     from openpyxl.styles import Font, PatternFill
     from openpyxl.worksheet.datavalidation import DataValidation
     head_fill = PatternFill("solid", fgColor="3B1F5E")
     head_font = Font(bold=True, color="FFFFFF")
-    for c, h in enumerate(["#", "Restaurant name", "Phone", "Location",
-                           "Email", "Outcome", "Callback date", "Notes"], 1):
+    for c, h in enumerate(TRACKER_HEADERS, 1):
         cell = ws.cell(row=1, column=c, value=h)
         cell.fill = head_fill
         cell.font = head_font
-    for c, h in ((10, "Outcome"), (11, "Count")):
+    for c, h in ((14, "Outcome"), (15, "Count")):
         cell = ws.cell(row=1, column=c, value=h)
         cell.fill = head_fill
         cell.font = head_font
-    for i, o in enumerate(OUTCOMES.split(",")):
+    for i, o in enumerate(SUMMARY_OUTCOMES):
         r = i + 2
-        ws.cell(row=r, column=10, value=o)
-        ws.cell(row=r, column=11, value=f"=COUNTIF(F2:F{last_row},J{r})")
-    ws.cell(row=9, column=10, value="TOTAL")
-    ws.cell(row=9, column=11, value="=SUM(K2:K8)")
-    for col, w in {"A": 5, "B": 30, "C": 16, "D": 26, "E": 30, "F": 16,
-                   "G": 15, "H": 34, "J": 18, "K": 10}.items():
+        ws.cell(row=r, column=14, value=o)
+        ws.cell(row=r, column=15, value=f"=COUNTIF(J2:J{last_row},N{r})")
+    tr = len(SUMMARY_OUTCOMES) + 2
+    ws.cell(row=tr, column=14, value="TOTAL")
+    ws.cell(row=tr, column=15, value=f"=SUM(O2:O{tr - 1})")
+    for col, w in {"A": 5, "B": 30, "C": 16, "D": 26, "E": 30, "F": 7,
+                   "G": 6, "H": 24, "I": 52, "J": 17, "K": 13, "L": 30,
+                   "N": 18, "O": 10}.items():
         ws.column_dimensions[col].width = w
-    dv = DataValidation(type="list", formula1=f'"{OUTCOMES}"',
+    dv = DataValidation(type="list", formula1=f'"{FUNNEL_OUTCOMES}"',
                         allow_blank=True)
-    dv.add(f"F2:F{last_row}")
+    dv.add(f"J2:J{last_row}")
     ws.add_data_validation(dv)
     ws.freeze_panes = "A2"
-    ws.auto_filter.ref = f"A1:H{last_row}"
+    ws.auto_filter.ref = f"A1:L{last_row}"
+
+
+def _read_sheet_rows(ws):
+    """Read a dated sheet's leads in EITHER layout (v3.5: Outcome in F;
+    v3.6: Score in F, Outcome in J) so old sheets upgrade in place
+    without losing a single call outcome."""
+    rows = []
+    f1 = ws.cell(row=1, column=6).value
+    for r in range(2, (ws.max_row or 0) + 1):
+        name = ws.cell(row=r, column=2).value
+        if not name:
+            continue
+        d = {"name": name, "phone": ws.cell(row=r, column=3).value,
+             "location": ws.cell(row=r, column=4).value,
+             "email": ws.cell(row=r, column=5).value, "score": None,
+             "tier": None, "angle": None, "why": None, "outcome": None,
+             "callback": None, "notes": None}
+        if f1 == "Score":
+            d.update(score=ws.cell(row=r, column=6).value,
+                     tier=ws.cell(row=r, column=7).value,
+                     angle=ws.cell(row=r, column=8).value,
+                     why=ws.cell(row=r, column=9).value,
+                     outcome=ws.cell(row=r, column=10).value,
+                     callback=ws.cell(row=r, column=11).value,
+                     notes=ws.cell(row=r, column=12).value)
+        else:
+            d.update(outcome=ws.cell(row=r, column=6).value,
+                     callback=ws.cell(row=r, column=7).value,
+                     notes=ws.cell(row=r, column=8).value)
+        rows.append(d)
+    return rows
 
 
 def update_tracker(leads):
     """Put the leads straight into vaani-call-tracker.xlsx - no copy-paste.
 
-    Leads go into a sheet named for today (e.g. "21 Oct 2026"). A run on
-    another day creates that day's sheet in the SAME file; a second run on
-    the same day only adds leads whose phone is not already in today's
-    sheet. Returns (added, already_there, sheet_name), or None if the
-    tracker could not be updated (the CSV/Excel outputs are unaffected).
+    Leads go into a sheet named for today (e.g. "21 Oct 2026"), sorted
+    best-first by score, each with its Tier, Pitch angle and Why. A run
+    on another day creates that day's sheet in the SAME file; a second
+    run the same day only adds leads whose phone is not already there.
+    Sheets from older versions are upgraded in place, outcomes kept.
+    Returns (added, already_there, sheet_name), or None if the tracker
+    could not be updated (the CSV/Excel outputs are unaffected).
     """
     if not ensure_openpyxl():
         return None
     import openpyxl
-    from openpyxl.worksheet.datavalidation import DataValidation
     path = os.path.join(HERE, TRACKER_NAME)
     sheet_name = date.today().strftime("%d %b %Y")
     try:
@@ -694,60 +1065,32 @@ def update_tracker(leads):
     except Exception:
         return None
     try:
+        preserved = []
         if sheet_name in wb.sheetnames:
-            ws = wb[sheet_name]
-        elif "Call Tracker" in wb.sheetnames:
-            ws = wb.copy_worksheet(wb["Call Tracker"])
-            ws.title = sheet_name
-            for row in ws.iter_rows(min_row=2, max_row=ws.max_row,
-                                    max_col=8):
-                for cell in row:
-                    if cell.column != 6:  # keep Outcome = "Not called"
-                        cell.value = None
+            idx = wb.sheetnames.index(sheet_name)
+            preserved = _read_sheet_rows(wb[sheet_name])
+            wb.remove(wb[sheet_name])
+            ws = wb.create_sheet(sheet_name, idx)
         else:
             ws = wb.create_sheet(sheet_name)
-            _style_tracker_sheet(ws, 200)
-        existing, last_filled = set(), 1
-        for r in range(2, ws.max_row + 1):
-            if ws.cell(row=r, column=2).value:
-                last_filled = r
-            phone = ws.cell(row=r, column=3).value
-            if phone:
-                for part in re.split(r"[,;/|]", str(phone)):
-                    d = re.sub(r"\D", "", part)
-                    if len(d) >= 10:
-                        existing.add(d[-10:])
-        added, already, r = 0, 0, last_filled
-        for lead in leads:
-            keys = set()
-            for part in re.split(r"[,;/|]", lead["phone"]):
-                d = re.sub(r"\D", "", part)
-                if len(d) >= 10:
-                    keys.add(d[-10:])
+        existing = set()
+        for d in preserved:
+            existing |= _phone_keys(d.get("phone"))
+        r = 1
+        for d in preserved:
+            r += 1
+            _write_tracker_row(ws, r, d)
+        added, already = 0, 0
+        for lead in sorted(leads, key=lambda x: -(x.get("score") or 0)):
+            keys = _phone_keys(lead["phone"])
             if keys & existing:
                 already += 1
                 continue
             r += 1
-            ws.cell(row=r, column=1, value=r - 1)
-            ws.cell(row=r, column=2, value=lead["name"])
-            ws.cell(row=r, column=3, value=lead["phone"])
-            ws.cell(row=r, column=4, value=lead["location"])
-            ws.cell(row=r, column=5, value=lead["email"])
-            ws.cell(row=r, column=6, value="Not called")
+            _write_tracker_row(ws, r, lead)
             existing |= keys
             added += 1
-        last_row = max(r, 41)
-        keep = [dv for dv in ws.data_validations.dataValidation
-                if "F" not in str(dv.sqref)]
-        ws.data_validations.dataValidation = keep
-        dv = DataValidation(type="list", formula1=f'"{OUTCOMES}"',
-                            allow_blank=True)
-        dv.add(f"F2:F{last_row}")
-        ws.add_data_validation(dv)
-        for i in range(7):
-            rr = i + 2
-            ws.cell(row=rr, column=11,
-                    value=f"=COUNTIF(F2:F{last_row},J{rr})")
+        _style_tracker_sheet(ws, max(r, 41))
         wb.active = wb.sheetnames.index(sheet_name)
         wb.save(path)
         return added, already, sheet_name
@@ -760,6 +1103,21 @@ def update_tracker(leads):
         print(f"\n  (!) Could not update the call tracker ({e}).")
         print("      The CSV and Excel files are saved as usual.")
         return None
+
+
+def _write_tracker_row(ws, r, d):
+    ws.cell(row=r, column=1, value=r - 1)
+    ws.cell(row=r, column=2, value=d.get("name"))
+    ws.cell(row=r, column=3, value=d.get("phone"))
+    ws.cell(row=r, column=4, value=d.get("location"))
+    ws.cell(row=r, column=5, value=d.get("email"))
+    ws.cell(row=r, column=6, value=d.get("score"))
+    ws.cell(row=r, column=7, value=d.get("tier"))
+    ws.cell(row=r, column=8, value=d.get("angle"))
+    ws.cell(row=r, column=9, value=d.get("why"))
+    ws.cell(row=r, column=10, value=d.get("outcome") or "Not called")
+    ws.cell(row=r, column=11, value=d.get("callback"))
+    ws.cell(row=r, column=12, value=d.get("notes"))
 
 
 # ---------------------------------------------------------------- main
@@ -805,11 +1163,15 @@ def main():
     names, locations, phones, emails = [], [], [], []
     seen_phones, seen_emails = set(), set()
     skipped_no_phone = 0
+    skipped_closed = 0
     for r in rows:
         key = (r["name"].lower(), r["address"].lower())
         if key in seen_places:
             continue
         seen_places.add(key)
+        if r.get("closed"):
+            skipped_closed += 1
+            continue
         mob = split_phones(r["phone"])
         if not mob:
             skipped_no_phone += 1
@@ -826,10 +1188,33 @@ def main():
             if e not in seen_emails:
                 seen_emails.add(e)
                 emails.append(e)
+        sc, tier, reasons, angle = score_lead(r)
         leads.append({"name": r["name"], "location": r["address"],
-                      "phone": ", ".join(mob), "email": ", ".join(em)})
+                      "phone": ", ".join(mob), "email": ", ".join(em),
+                      "website": r.get("website") or "",
+                      "rating": r.get("rating"),
+                      "reviews": r.get("reviews"),
+                      "score": sc, "tier": tier, "angle": angle,
+                      "why": "; ".join(reasons[:4])})
+
+    suppressed_phones = master_suppressed() | read_tracker_suppressions()
+    kept, suppressed_n = [], 0
+    for lead in leads:
+        hit = _phone_keys(lead["phone"]) & suppressed_phones
+        if hit:
+            suppressed_n += 1
+            for k in hit:
+                master_suppress(k, "marked in tracker")
+            continue
+        kept.append(lead)
+    leads = kept
 
     if not leads:
+        if suppressed_n:
+            sys.exit(
+                "\n  Every lead from this search is already in your "
+                "tracker marked\n  Not interested / Wrong number / Do not "
+                "contact - nothing new to save.\n")
         sys.exit(
             f"\n  Found {len(rows)} places, but none of them had a mobile "
             "number\n  (landlines don't count). Nothing was saved - try a "
@@ -853,6 +1238,8 @@ def main():
         except Exception as e:
             print(f"  (!) Excel file failed: {e}")
 
+    for lead in leads:
+        master_upsert(lead)
     tracker_result = update_tracker(leads)
 
     # ---- summary -----------------------------------------------------------
@@ -860,7 +1247,17 @@ def main():
     print(f"  Restaurants in your database : {len(names)} "
           "(every one has a mobile number)")
     print(f"  Left out - no mobile number  : {skipped_no_phone}")
+    if skipped_closed:
+        print(f"  Left out - closed business   : {skipped_closed}")
+    if suppressed_n:
+        print(f"  Left out - already marked    : {suppressed_n} "
+              "(Not interested / Wrong number / Do not contact)")
     print(f"  Email IDs                    : {len(emails)}")
+    tiers = {"A": 0, "B": 0, "C": 0}
+    for l in leads:
+        tiers[l.get("tier") or "C"] += 1
+    print(f"  Lead quality                 : {tiers['A']} A - call today, "
+          f"{tiers['B']} B, {tiers['C']} C")
     if tracker_result:
         t_added, t_already, t_sheet = tracker_result
         print(f"  Call tracker                 : {t_added} lead(s) added "
