@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
-"""Vaani Kit Sender v1.0.1 - sends ONE WhatsApp kit (intro text +
-report card image + brochure PDF, together in one chat) through
-WhatsApp Web, for the Vaani CRM's Auto-send button.
+"""Vaani Kit Sender v1.0.2 - sends ONE WhatsApp kit through
+WhatsApp Web, for the Vaani CRM's Auto-send button, as three
+messages in this order:
 
-    py kit_send.py <phone10> <card.png> <brochure.pdf> <caption.txt>
+    1. the intro / greeting text (the file passed as caption.txt)
+    2. the report card image
+    3. the brochure PDF
+
+    py kit_send.py <phone10> <card.png> <brochure.pdf> <intro.txt>
 
 It drives a real Chrome window (Playwright) with a persistent
 profile in wa-profile/ next to this file: the first run shows the
@@ -31,7 +35,7 @@ import subprocess
 import sys
 import urllib.request
 
-VERSION = "1.0.1"
+VERSION = "1.0.2"
 UPDATE_URL = ("https://raw.githubusercontent.com/yash6969-io/"
               "vaani-lead-engine/main/kit_send.py")
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -40,6 +44,9 @@ COMPOSE = 'footer div[contenteditable="true"]'
 PREVIEW_MARK = ('div[data-testid="media-caption-input"], '
                 '[data-testid="media-preview"], '
                 'div[data-animate-modal-popup="true"]')
+SEND_BTN = ('span[data-icon="send"], div[aria-label="Send"], '
+            'button[aria-label="Send"], [data-testid="media-send"], '
+            '[data-testid="send"]')
 
 
 def _version_tuple(text):
@@ -113,6 +120,10 @@ def fail(pg, msg):
     return 1
 
 
+# ------------------------------------------------------------------
+# the three sends
+# ------------------------------------------------------------------
+
 def _preview_open(pg, timeout=9000):
     try:
         pg.locator(PREVIEW_MARK).first.wait_for(state="visible",
@@ -122,22 +133,50 @@ def _preview_open(pg, timeout=9000):
         return False
 
 
-def _paste_files(pg, card_png, brochure_pdf):
-    """Paste both files into the chat - WhatsApp Web opens its
-    media preview for pasted files. True if the preview opened."""
-    def b64(path):
-        with open(path, "rb") as f:
-            return base64.b64encode(f.read()).decode()
-    js = """([cardB64, pdfB64, cardName, pdfName]) => {
-      function fileFrom(b64, name, type) {
-        const bin = atob(b64);
-        const arr = new Uint8Array(bin.length);
-        for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
-        return new File([arr], name, {type: type});
-      }
+def _preview_gone(pg, timeout=9000):
+    try:
+        pg.locator(PREVIEW_MARK).first.wait_for(state="hidden",
+                                                timeout=timeout)
+        return True
+    except Exception:
+        return False
+
+
+def send_text(pg, text):
+    """Message 1: the intro as a normal chat message. Verified the
+    strict way: if our text is still sitting in the typing box
+    afterwards, it did not go out."""
+    box = pg.locator(COMPOSE).first
+    box.click()
+    pg.keyboard.insert_text(text)
+    pg.wait_for_timeout(700)
+    pg.keyboard.press("Enter")
+    pg.wait_for_timeout(1200)
+    try:
+        left = box.inner_text(timeout=3000)
+    except Exception:
+        left = ""
+    if text[:40] in left:
+        try:
+            pg.locator(SEND_BTN).last.click(timeout=4000)
+            pg.wait_for_timeout(1200)
+            left = box.inner_text(timeout=3000)
+        except Exception:
+            pass
+    return text[:40] not in (left or "")
+
+
+def _paste_one(pg, path, mime):
+    """Paste one file into the chat; WhatsApp Web opens its media
+    preview. True if the preview opened."""
+    with open(path, "rb") as f:
+        b64 = base64.b64encode(f.read()).decode()
+    js = """([b64, name, mime]) => {
+      const bin = atob(b64);
+      const arr = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
       const dt = new DataTransfer();
-      dt.items.add(fileFrom(cardB64, cardName, 'image/png'));
-      dt.items.add(fileFrom(pdfB64, pdfName, 'application/pdf'));
+      dt.items.add(new File([arr], name, {type: mime}));
       const target = document.querySelector(
           'footer [contenteditable="true"]') || document.body;
       target.focus();
@@ -146,18 +185,16 @@ def _paste_files(pg, card_png, brochure_pdf):
       return target.dispatchEvent(ev);
     }"""
     try:
-        pg.evaluate(js, [b64(card_png), b64(brochure_pdf),
-                         os.path.basename(card_png),
-                         os.path.basename(brochure_pdf)])
+        pg.evaluate(js, [b64, os.path.basename(path), mime])
     except Exception:
         return False
     return _preview_open(pg)
 
 
-def _button_files(pg, card_png, brochure_pdf):
-    """Fallback: find the attach button in any of its known
-    shapes (or by position, left of the typing box), open it and
-    set both files on the file input it reveals."""
+def _button_one(pg, path):
+    """Fallback for one file: find the attach button in any of its
+    known shapes (or by position, left of the typing box), open it
+    and set the file on the input it reveals."""
     candidates = [
         'footer span[data-icon="plus"]',
         'footer span[data-icon="plus-rounded"]',
@@ -202,15 +239,41 @@ def _button_files(pg, card_png, brochure_pdf):
     inputs = pg.locator('input[type="file"]')
     for i in range(inputs.count() - 1, -1, -1):
         try:
-            inputs.nth(i).set_input_files([card_png, brochure_pdf],
-                                          timeout=8000)
+            inputs.nth(i).set_input_files([path], timeout=8000)
             return _preview_open(pg)
         except Exception:
             continue
     return _preview_open(pg, 2000)
 
 
-def send_kit(phone, card_png, brochure_pdf, caption):
+def send_file(pg, path, mime):
+    """Messages 2 and 3: one file each, sent from the preview."""
+    if not _paste_one(pg, path, mime):
+        step("Paste did not open the preview - trying the "
+             "attach button")
+        if not _button_one(pg, path):
+            return False
+    pg.wait_for_timeout(1200)
+    btn = pg.locator(SEND_BTN).first
+    try:
+        btn.wait_for(state="visible", timeout=10000)
+        btn.click()
+    except Exception:
+        pg.keyboard.press("Enter")
+    if not _preview_gone(pg):
+        try:
+            pg.locator(SEND_BTN).first.click(timeout=4000)
+        except Exception:
+            pass
+    if not _preview_gone(pg, 4000):
+        return False
+    pg.wait_for_timeout(1500)
+    return True
+
+
+# ------------------------------------------------------------------
+
+def send_kit(phone, card_png, brochure_pdf, intro_text):
     from playwright.sync_api import sync_playwright
 
     os.makedirs(PROFILE_DIR, exist_ok=True)
@@ -247,74 +310,29 @@ def send_kit(phone, card_png, brochure_pdf, caption):
                 ctx.close()
                 return rc
         pg.wait_for_timeout(1200)
-        step("Chat open - attaching the report card and brochure")
-        if not _paste_files(pg, card_png, brochure_pdf):
-            step("Paste did not open the preview - trying the "
-                 "attach button")
-            if not _button_files(pg, card_png, brochure_pdf):
-                rc = fail(pg, "The files could not be attached "
-                              "in WhatsApp Web - neither pasting "
-                              "nor the attach button opened the "
-                              "preview.")
-                ctx.close()
-                return rc
-        # ---- caption = the intro text, in the media preview ----
-        cap_box = pg.locator(
-            'div[data-testid="media-caption-input"] '
-            'div[contenteditable="true"], '
-            f'{PREVIEW_MARK} div[contenteditable="true"]').first
-        caption_in_preview = False
-        try:
-            cap_box.wait_for(state="visible", timeout=10000)
-            cap_box.click()
-            pg.keyboard.insert_text(caption)
-            caption_in_preview = True
-        except Exception:
-            step("No caption box in the preview - the intro will "
-                 "be sent as a message right after the files")
-        send_btn = pg.locator(
-            'span[data-icon="send"], div[aria-label="Send"], '
-            'button[aria-label="Send"], '
-            '[data-testid="media-send"]').first
-        sent = False
-        try:
-            send_btn.wait_for(state="visible", timeout=12000)
-            send_btn.click()
-            sent = True
-        except Exception:
-            if caption_in_preview:
-                try:
-                    cap_box.press("Enter")
-                    sent = True
-                except Exception:
-                    pass
-        if not sent:
-            rc = fail(pg, "Files attached but the Send button "
-                          "was not found - nothing was sent.")
+        step("Sending the introduction message")
+        if not send_text(pg, intro_text):
+            rc = fail(pg, "The introduction message could not be "
+                          "sent, so the files were not sent "
+                          "either - the kit only goes out in "
+                          "order: text, report card, brochure.")
             ctx.close()
             return rc
-        pg.wait_for_timeout(2500)
-        if not caption_in_preview:
-            try:
-                box = pg.locator(COMPOSE).first
-                box.wait_for(state="visible", timeout=15000)
-                box.click()
-                pg.keyboard.insert_text(caption)
-                pg.keyboard.press("Enter")
-                pg.wait_for_timeout(1800)
-            except Exception:
-                rc = fail(pg, "Files were sent but the intro "
-                              "text could not be posted.")
-                ctx.close()
-                return rc
-        try:
-            pg.wait_for_selector(
-                'span[data-icon="media-document"], '
-                'span[data-icon="document"], img[src^="blob:"]',
-                timeout=15000)
-        except Exception:
-            pass
-        step("Kit sent")
+        step("Sending the report card")
+        if not send_file(pg, card_png, "image/png"):
+            rc = fail(pg, "The introduction went, but the report "
+                          "card could not be attached - the "
+                          "brochure was not sent either.")
+            ctx.close()
+            return rc
+        step("Sending the brochure")
+        if not send_file(pg, brochure_pdf, "application/pdf"):
+            rc = fail(pg, "The introduction and report card went, "
+                          "but the brochure could not be "
+                          "attached.")
+            ctx.close()
+            return rc
+        step("Kit sent - text, report card and brochure, in order")
         print("SENT", flush=True)
         pg.wait_for_timeout(1200)
         ctx.close()
@@ -328,7 +346,7 @@ def main():
         print(__doc__)
         return 1
     phone = re.sub(r"\D", "", args[0])[-10:]
-    card_png, brochure_pdf, caption_file = args[1], args[2], args[3]
+    card_png, brochure_pdf, intro_file = args[1], args[2], args[3]
     if len(phone) != 10:
         return fail(None, "Bad phone number.")
     if not os.path.exists(card_png):
@@ -336,13 +354,13 @@ def main():
     if not os.path.exists(brochure_pdf):
         return fail(None, f"Brochure file not found: {brochure_pdf}")
     try:
-        with open(caption_file, encoding="utf-8") as f:
-            caption = f.read().strip()
+        with open(intro_file, encoding="utf-8") as f:
+            intro_text = f.read().strip()
     except Exception:
-        return fail(None, "Caption file could not be read.")
-    if not caption:
-        return fail(None, "Caption is empty.")
-    return send_kit(phone, card_png, brochure_pdf, caption)
+        return fail(None, "Introduction file could not be read.")
+    if not intro_text:
+        return fail(None, "Introduction text is empty.")
+    return send_kit(phone, card_png, brochure_pdf, intro_text)
 
 
 if __name__ == "__main__":
