@@ -34,7 +34,7 @@ DB_PATH = os.path.join(HERE, "vaani_master.db")
 TRACKER_PATH = os.path.join(HERE, "vaani-call-tracker.xlsx")
 BACKUP_PATH = os.path.join(HERE, "vaani_master.db.crm-backup")
 
-VERSION = "1.4.0"
+VERSION = "1.4.1"
 UPDATE_URL = ("https://raw.githubusercontent.com/yash6969-io/"
               "vaani-lead-engine/main/vaani_crm.py")
 PORTS = (8765, 8766, 8767, 8768, 8769)
@@ -602,24 +602,26 @@ def kit_observation(lead):
 
 def kit_message(lead):
     name = lead["name"] or "your restaurant"
-    area = kit_area(lead)
-    area_phrase = f" in {area}" if area else ""
     lines = [
         f"Namaste {name} team, this is {USER_NAME} Tanna from "
         "Book My Food.",
         "",
-        f"I study how restaurants{area_phrase} look on Google, and "
-        f"I have prepared a free one-page Report Card for {name} - "
-        "your rating, how you stand against nearby restaurants, "
-        "and the few things quietly costing you orders.",
+        "A little about us: Book My Food is an operations "
+        "platform for restaurants - your own online ordering "
+        "with no aggregator commission on your regulars, plus "
+        "billing and payments, kitchen order flow and your own "
+        "customer list, all in one place.",
         "",
         kit_observation(lead),
         "",
-        "I am sending the report card with this message - no "
-        "charge, no obligation. If it is useful, I would love 10 "
-        "minutes to show you how restaurants keep the full amount "
-        "on orders from their own regulars instead of paying "
-        "commission on them.",
+        f"I am sharing two things right after this message - a "
+        f"free one-page Report Card on how {name} looks on "
+        "Google today, and our brochure with the platform "
+        "details. Please do check them out - no charge, no "
+        "obligation.",
+        "",
+        f"If they are useful, I would love 10 minutes to show "
+        f"you how this would work for {name}.",
     ]
     if BMF_WEBSITE:
         lines += ["", f"More about us: {BMF_WEBSITE}"]
@@ -653,13 +655,13 @@ def mark_kit_sent(conn, phone):
     conn.execute(
         "INSERT INTO kit_log (phone, ts, channel) VALUES"
         " (?, ?, 'whatsapp')", (phone, now))
-    bits = "intro message + report card"
+    bits = "intro message, report card"
     if os.path.exists(BROCHURE_PATH):
-        bits += " + brochure"
+        bits += ", brochure"
     conn.execute(
         "INSERT INTO crm_remarks (phone, ts, text, source) VALUES"
         " (?, ?, ?, 'kit')",
-        (phone, now, f"WhatsApp kit sent ({bits})"))
+        (phone, now, f"WhatsApp kit sent - in order: {bits}"))
     conn.commit()
     lead = fetch_lead(conn, phone)
     if lead and not lead["followup"]:
@@ -1627,7 +1629,7 @@ def kit_panel(conn, lead):
         auto_block = f"""<div style="background:#ECFDF5;border:1px solid #A6F4C5;border-radius:12px;padding:14px 16px;margin-bottom:14px">
 <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
 <button class="btn" type="button" onclick="autosend(this,'{esc(phone)}')">Send kit automatically</button>
-<span class="small">Intro + report card + brochure, together, in one send.</span></div>
+<span class="small">Sends in order: the intro message, then the report card, then the brochure.</span></div>
 <div class="small" style="margin-top:7px">Opens WhatsApp Web in a Chrome window and sends it for you, then logs it here and sets tomorrow's follow-up. The first time only, scan the QR code in that window with your phone (WhatsApp &gt; Linked devices). Keep the window open until it finishes.</div></div>"""
     else:
         auto_block = ('<div class="small" style="margin-bottom:12px">'
@@ -1640,7 +1642,7 @@ def kit_panel(conn, lead):
 <ol class="kitsteps">
 <li><span class="n">1</span><div>
 <a class="btn" target="_blank" href="{esc(wa_link(phone, msg))}">Open WhatsApp with this intro</a>
-<div class="small">The text is filled in for you. Before pressing send, attach the report card (step 2) in the same chat.</div></div></li>
+<div class="small">Send this message first. Then attach the report card (step 2) and the brochure (step 3) in the same chat, in that order.</div></div></li>
 <li><span class="n">2</span><div><b>Attach the report card</b>{card_html}</div></li>
 <li><span class="n">3</span><div><b>Send the brochure</b><br>{bro_html}</div></li>
 <li><span class="n">4</span><div><form method="post" action="/kit-sent" style="margin:0">
@@ -1671,8 +1673,9 @@ def kit_html(conn):
     body = f"""<h1>Send the WhatsApp kit</h1>
 <div class="sub">Your top {len(batch)} pitchable leads who have not
 received the kit yet - best scores first. <b>Auto-send kit</b> opens
-WhatsApp Web and sends the intro, his report card and the brochure
-together, then logs it and sets tomorrow's call follow-up. The
+WhatsApp Web and sends, in order, the intro message, his report
+card and the brochure, then logs it and sets tomorrow's call
+follow-up. The
 WhatsApp button is the manual way (message prefilled, you attach the
 files). Pace yourself like a person - a few at a time, not all of
 them in one minute.</div>
