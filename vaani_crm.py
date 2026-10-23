@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Vaani CRM v1.3
+Vaani CRM v1.4
 ==============
 A personal CRM for the leads Vaani scrapes - just for you, on your own
 computer. Excel was never built for follow-ups, remarks and daily call
@@ -34,7 +34,7 @@ DB_PATH = os.path.join(HERE, "vaani_master.db")
 TRACKER_PATH = os.path.join(HERE, "vaani-call-tracker.xlsx")
 BACKUP_PATH = os.path.join(HERE, "vaani_master.db.crm-backup")
 
-VERSION = "1.3.1"
+VERSION = "1.4.0"
 UPDATE_URL = ("https://raw.githubusercontent.com/yash6969-io/"
               "vaani-lead-engine/main/vaani_crm.py")
 PORTS = (8765, 8766, 8767, 8768, 8769)
@@ -46,6 +46,9 @@ REPORT_CARD_SCRIPT = os.path.join(HERE, "report_card.py")
 REPORT_CARDS_DIR = os.path.join(HERE, "report-cards")
 BROCHURE_PATH = os.path.join(HERE, "book-my-food-brochure.pdf")
 BMF_WEBSITE = "https://bookmyfood.si/"
+KIT_SEND_SCRIPT = os.path.join(HERE, "kit_send.py")
+KIT_SEND_URL = ("https://raw.githubusercontent.com/yash6969-io/"
+                "vaani-lead-engine/main/kit_send.py")
 
 STATUSES = ["Not called", "No answer", "Staff reached",
             "Decision-maker reached", "Conversation", "Interested",
@@ -664,6 +667,112 @@ def mark_kit_sent(conn, phone):
         set_status(conn, phone, lead["status"] or "Not called",
                    tomorrow)
     return now
+
+
+def ensure_kit_sender():
+    """The Auto-send helper (kit_send.py) lives next to the CRM. If
+    it is not there yet, fetch it from the same GitHub repo the CRM
+    updates itself from - same sanity checks as the updater."""
+    if os.path.exists(KIT_SEND_SCRIPT):
+        return True
+    try:
+        req = urllib.request.Request(
+            KIT_SEND_URL, headers={"User-Agent": "VaaniCRM"})
+        with urllib.request.urlopen(req, timeout=15) as r:
+            content = r.read().decode("utf-8", "replace")
+    except Exception:
+        return False
+    if "Vaani Kit Sender" not in content or len(content) < 5000:
+        return False
+    try:
+        compile(content, "kit_send.py", "exec")
+        with open(KIT_SEND_SCRIPT, "w", encoding="utf-8") as f:
+            f.write(content)
+    except Exception:
+        return False
+    return True
+
+
+def autosend_kit(conn, phone):
+    """Send the whole kit - intro + report card + brochure, together -
+    through WhatsApp Web via kit_send.py. Returns (ok, message).
+    Both files or nothing: if either is missing and cannot be made,
+    nothing is sent."""
+    lead = fetch_lead(conn, phone)
+    if not lead:
+        return False, "Lead not found."
+    reason = kit_skip_reason(lead)
+    if reason:
+        return False, "On the don't-pitch list: " + reason
+    if not ensure_kit_sender():
+        return False, ("The sender tool (kit_send.py) is not in "
+                       "this folder and could not be downloaded - "
+                       "check the internet connection.")
+    card = kit_card_file(phone)
+    if not card:
+        generate_card(phone)
+        card = kit_card_file(phone)
+    if not card:
+        return False, ("The report card could not be generated for "
+                       "this lead, so nothing was sent.")
+    if not os.path.exists(BROCHURE_PATH):
+        return False, ("book-my-food-brochure.pdf is not in this "
+                       "folder - the kit is only sent complete, so "
+                       "nothing was sent.")
+    caption_path = os.path.join(HERE, "kit_caption.txt")
+    try:
+        with open(caption_path, "w", encoding="utf-8") as f:
+            f.write(kit_message(lead))
+    except Exception:
+        return False, "Could not prepare the intro message."
+    try:
+        proc = subprocess.run(
+            [sys.executable, KIT_SEND_SCRIPT, str(phone), card,
+             BROCHURE_PATH, caption_path],
+            cwd=HERE, capture_output=True, text=True, timeout=420)
+        out = (proc.stdout or "") + (proc.stderr or "")
+    except subprocess.TimeoutExpired:
+        return False, ("Sending took too long and was stopped. If "
+                       "the WhatsApp window is still open, check "
+                       "whether the kit went through before trying "
+                       "again.")
+    except Exception as e:
+        return False, f"The sender could not start: {e}"
+    lines = [ln.strip() for ln in out.splitlines() if ln.strip()]
+    if lines and lines[-1] == "SENT":
+        return True, "Sent"
+    for ln in reversed(lines):
+        if ln.startswith("ERROR:"):
+            return False, ln[len("ERROR:"):].strip()
+    return False, ("The sender finished without confirming the "
+                   "send. Check the WhatsApp window - if the kit "
+                   "is in the chat, use Mark sent to log it.")
+
+
+AUTOSEND_JS = """<script>
+function autosend(btn, phone) {
+  var old = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'Sending - watch the WhatsApp window...';
+  fetch('/api/kit-autosend', {method: 'POST',
+    headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+    body: 'phone=' + encodeURIComponent(phone)})
+  .then(r => r.json()).then(j => {
+    if (j.ok) {
+      btn.textContent = 'Kit sent';
+      setTimeout(function() { location.reload(); }, 900);
+    } else {
+      btn.disabled = false;
+      btn.textContent = old;
+      alert(j.error || 'Auto-send failed.');
+    }
+  }).catch(function() {
+    btn.disabled = false;
+    btn.textContent = old;
+    alert('Auto-send could not reach the CRM.');
+  });
+}
+</script>"""
 
 
 # ---------------------------------------------------------------- html helpers
@@ -1514,8 +1623,20 @@ def kit_panel(conn, lead):
     else:
         bro_html = ('<div class="small">The brochure PDF is not in '
                     'this folder - skip this step.</div>')
+    if os.path.exists(BROCHURE_PATH):
+        auto_block = f"""<div style="background:#ECFDF5;border:1px solid #A6F4C5;border-radius:12px;padding:14px 16px;margin-bottom:14px">
+<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+<button class="btn" type="button" onclick="autosend(this,'{esc(phone)}')">Send kit automatically</button>
+<span class="small">Intro + report card + brochure, together, in one send.</span></div>
+<div class="small" style="margin-top:7px">Opens WhatsApp Web in a Chrome window and sends it for you, then logs it here and sets tomorrow's follow-up. The first time only, scan the QR code in that window with your phone (WhatsApp &gt; Linked devices). Keep the window open until it finishes.</div></div>"""
+    else:
+        auto_block = ('<div class="small" style="margin-bottom:12px">'
+                      'Auto-send is off: the brochure PDF is not in '
+                      'this folder, and the kit only goes out '
+                      'complete.</div>')
     return f"""<div class="panel" style="margin-top:16px">{head}
-{sent_line}<div class="kitmsg">{esc(msg)}</div>
+{sent_line}{auto_block}<div class="kitmsg">{esc(msg)}</div>
+<div class="small" style="margin:14px 0 0"><b>Or send it yourself, step by step:</b></div>
 <ol class="kitsteps">
 <li><span class="n">1</span><div>
 <a class="btn" target="_blank" href="{esc(wa_link(phone, msg))}">Open WhatsApp with this intro</a>
@@ -1528,7 +1649,7 @@ def kit_panel(conn, lead):
 <button class="btn" type="submit">Mark kit as sent</button>
 <span class="small">Logs it on this lead and sets a call follow-up for tomorrow.</span>
 </form></div></li>
-</ol></div>"""
+</ol></div>""" + AUTOSEND_JS
 
 
 def kit_html(conn):
@@ -1549,9 +1670,12 @@ def kit_html(conn):
     ready = sum(1 for r in batch if kit_card_file(r["phone"]))
     body = f"""<h1>Send the WhatsApp kit</h1>
 <div class="sub">Your top {len(batch)} pitchable leads who have not
-received the kit yet - best scores first. For each one: open WhatsApp,
-attach the report card, then mark it sent. Pace yourself like a
-person - a few at a time, not all of them in one minute.</div>
+received the kit yet - best scores first. <b>Auto-send kit</b> opens
+WhatsApp Web and sends the intro, his report card and the brochure
+together, then logs it and sets tomorrow's call follow-up. The
+WhatsApp button is the manual way (message prefilled, you attach the
+files). Pace yourself like a person - a few at a time, not all of
+them in one minute.</div>
 <div class="panel" style="margin:16px 0">
 <b><span id="sentcount">{len(sent_today)}</span> kit(s) sent today</b>
 <span class="small"> - {ready} of these {len(batch)} leads already
@@ -1584,7 +1708,9 @@ have a report card ready; generate the rest as you go.</span></div>"""
             f'{esc(r["angle"] or "")}</span> {tier_badge(r["tier"])} '
             f'<span class="small">Score {esc(r["score"] or "-")}'
             f'</span> {card_bit}</div>'
-            f'<a class="btn" target="_blank" '
+            f'<button class="btn" onclick="autosend(this,'
+            f'\'{esc(r["phone"])}\')">Auto-send kit</button>'
+            f'<a class="btn ghost" target="_blank" '
             f'href="{esc(wa_link(r["phone"], kit_message(r)))}">'
             f'WhatsApp</a>{gen_bit}'
             f'<button class="btn ghost" onclick="markSent(this,'
@@ -1615,6 +1741,7 @@ function markSent(btn, phone) {
   });
 }
 </script>"""
+    body += AUTOSEND_JS
     return body
 
 
@@ -2063,6 +2190,12 @@ class Handler(BaseHTTPRequestHandler):
                                form.get("followup", ""))
                 self._redirect(form.get("next") or
                                f"/lead?phone={phone}")
+            elif parsed.path == "/api/kit-autosend":
+                phone = form.get("phone", "")
+                ok, msg = autosend_kit(conn, phone)
+                if ok:
+                    mark_kit_sent(conn, phone)
+                self._json({"ok": ok, "error": "" if ok else msg})
             elif parsed.path == "/api/kit-sent":
                 phone = form.get("phone", "")
                 ok = False
