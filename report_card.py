@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Vaani Report Card v1.2 - a one-page Google-presence report for one
+"""Vaani Report Card v1.2.1 - a one-page Google-presence report for one
 restaurant, generated from vaani_master.db (the leads Vaani scraped).
 
     py report_card.py 9898148202        one lead, by phone number
@@ -33,11 +33,12 @@ import urllib.request
 from datetime import date
 
 # ------------------------------------------------------------------ config
-VERSION = "1.2.0"
+VERSION = "1.2.1"
 UPDATE_URL = ("https://raw.githubusercontent.com/yash6969-io/"
               "vaani-lead-engine/main/report_card.py")
 SELLER_NAME = "Yash Tanna"
 SELLER_PHONE = ""          # e.g. "+91 98XXX XXXXX" - shown on the card
+BMF_WEBSITE = "https://bookmyfood.si/"
 BRAND = "Book My Food"
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -429,6 +430,7 @@ def build_html(lead, peers, st):
                  f'{items(gaps, "gap", ALERT)}</div>') if gaps else ""
     phone_line = (f' &middot; WhatsApp {esc(SELLER_PHONE)}'
                   if SELLER_PHONE else "")
+    site_line = (f'<br>{esc(BMF_WEBSITE)}' if BMF_WEBSITE else "")
     return f"""<!DOCTYPE html><html><head><meta charset="utf-8">
 <style>{CSS}</style></head><body><div class="card">
 <div class="head"><div class="kicker">Restaurant Report Card</div>
@@ -454,7 +456,7 @@ takes the cut - and whether the customer stays yours.</div></div>
 before the Diwali rush?</b><span>One short call - I will show you your
 own numbers, on your own menu.</span></div>
 <div class="brand"><div class="bname">{esc(BRAND)}</div>
-<div class="who2">{esc(SELLER_NAME)}{phone_line}</div></div></div>
+<div class="who2">{esc(SELLER_NAME)}{phone_line}{site_line}</div></div></div>
 <div class="fine">This report uses only your public Google listing data
 and the {st['n']} restaurants tracked in your area - no estimates about
 your kitchen or your books. Commission ranges are reported 2026 figures
