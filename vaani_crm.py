@@ -34,11 +34,18 @@ DB_PATH = os.path.join(HERE, "vaani_master.db")
 TRACKER_PATH = os.path.join(HERE, "vaani-call-tracker.xlsx")
 BACKUP_PATH = os.path.join(HERE, "vaani_master.db.crm-backup")
 
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 UPDATE_URL = ("https://raw.githubusercontent.com/yash6969-io/"
               "vaani-lead-engine/main/vaani_crm.py")
 PORTS = (8765, 8766, 8767, 8768, 8769)
 USER_NAME = "Yash"
+
+# WhatsApp kit (v1.3): the report card generator and brochure live in
+# this same folder; BMF_WEBSITE is added to kit messages when set.
+REPORT_CARD_SCRIPT = os.path.join(HERE, "report_card.py")
+REPORT_CARDS_DIR = os.path.join(HERE, "report-cards")
+BROCHURE_PATH = os.path.join(HERE, "book-my-food-brochure.pdf")
+BMF_WEBSITE = ""
 
 STATUSES = ["Not called", "No answer", "Staff reached",
             "Decision-maker reached", "Conversation", "Interested",
@@ -169,6 +176,9 @@ def get_conn():
         text TEXT, source TEXT DEFAULT 'app')""")
     conn.execute("""CREATE TABLE IF NOT EXISTS crm_meta (
         key TEXT PRIMARY KEY, value TEXT)""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS kit_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, phone TEXT, ts TEXT,
+        channel TEXT DEFAULT 'whatsapp')""")
     conn.commit()
     return conn
 
@@ -467,6 +477,195 @@ def fetch_remarks(conn, phone):
         (phone,)).fetchall()
 
 
+# ---------------------------------------------------------------- whatsapp kit
+
+KIT_CHAINS = ("mcdonald", "domino", "pizza hut", "kfc", "burger king",
+              "subway", "starbucks", "haldiram", "barbeque nation",
+              "wow momo", "wow! momo", "la pino", "baskin",
+              "cafe coffee", "jumbo king", "behrouz", "faasos",
+              "freshmenu", "oven story", "chaayos", "third wave",
+              "burger singh")
+
+
+def fmt_ts(ts):
+    try:
+        return datetime.fromisoformat(ts).strftime("%d %b %Y, %I:%M %p")
+    except Exception:
+        return ts or ""
+
+
+def kit_area(lead):
+    segs = [s.strip() for s in str(lead["address"] or "").split(",")
+            if s.strip()]
+    segs = [s for s in segs if not re.fullmatch(r"[\d\s\-]+", s)]
+    if len(segs) > 1:
+        segs = segs[:-1]
+    return segs[-1] if segs else ""
+
+
+def kit_skip_reason(lead):
+    """The Report Card generator's don't-pitch screen, plus CRM
+    terminal statuses. '' means: pitch this lead."""
+    name_low = (lead["name"] or "").lower()
+    if any(c in name_low for c in KIT_CHAINS):
+        return "National chain - decisions are centralised"
+    if lead["suppressed"]:
+        return "Marked " + (lead["suppress_reason"] or "suppressed")
+    if (lead["status"] or "") in TERMINAL_STATUSES:
+        return "Already closed: " + lead["status"]
+    if ((lead["angle"] or "").strip() == "Operations upgrade"
+            and (lead["rating"] or 0) >= 4.2
+            and (lead["reviews"] or 0) >= 200):
+        return "Already has direct ordering and a solid setup"
+    return ""
+
+
+def kit_card_file(phone):
+    if not phone or len(str(phone)) < 10:
+        return None
+    try:
+        for f in os.listdir(REPORT_CARDS_DIR):
+            if f.startswith(str(phone) + "-") and f.endswith(".png"):
+                return os.path.join(REPORT_CARDS_DIR, f)
+    except Exception:
+        pass
+    return None
+
+
+def generate_card(phone):
+    """Run the Report Card generator for one lead; True when a card
+    PNG exists afterwards."""
+    if not os.path.exists(REPORT_CARD_SCRIPT):
+        return False
+    try:
+        subprocess.run([sys.executable, REPORT_CARD_SCRIPT,
+                        str(phone), "--no-update"], cwd=HERE,
+                       timeout=120, capture_output=True)
+    except Exception:
+        pass
+    return kit_card_file(phone) is not None
+
+
+def kit_sent_map(conn):
+    rows = conn.execute(
+        "SELECT phone, MAX(ts) ts FROM kit_log GROUP BY phone"
+    ).fetchall()
+    return {r["phone"]: r["ts"] for r in rows if r["ts"]}
+
+
+def kit_sent_at(conn, phone):
+    row = conn.execute(
+        "SELECT MAX(ts) ts FROM kit_log WHERE phone = ?",
+        (phone,)).fetchone()
+    return row["ts"] if row and row["ts"] else None
+
+
+def kit_pending_count(conn):
+    sent = kit_sent_map(conn)
+    rows = conn.execute(
+        LEAD_SELECT + " WHERE l.suppressed = 0").fetchall()
+    n = 0
+    for r in rows:
+        if r["phone"] in sent or kit_skip_reason(r):
+            continue
+        n += 1
+    return n
+
+
+def kit_observation(lead):
+    angle = (lead["angle"] or "").strip()
+    reviews = lead["reviews"] or 0
+    if angle.startswith("Aggregator-dependent") or \
+            angle.startswith("No direct ordering"):
+        return ("One thing I noticed: customers who find you still "
+                "have to order through apps that keep 25-35% of "
+                "every order.")
+    if not (lead["website"] or "").strip():
+        return ("One thing I noticed: your Google listing has no "
+                "website, so a customer who wants to reach you "
+                "directly has nowhere to land.")
+    if reviews >= 300:
+        return (f"One thing I noticed: {reviews:,} people have "
+                "reviewed you, but their names and numbers sit with "
+                "the apps - you cannot reach a single regular "
+                "directly.")
+    if lead["rating"]:
+        return (f"One thing I noticed: at {lead['rating']} stars, "
+                "your Google presence is doing more selling than you "
+                "get credit for - the report shows where it leaks.")
+    return ("The report shows exactly where your Google presence "
+            "is quietly costing you orders.")
+
+
+def kit_message(lead):
+    name = lead["name"] or "your restaurant"
+    area = kit_area(lead)
+    area_phrase = f" in {area}" if area else ""
+    lines = [
+        f"Namaste {name} team, this is {USER_NAME} Tanna from "
+        "Book My Food.",
+        "",
+        f"I study how restaurants{area_phrase} look on Google, and "
+        f"I have prepared a free one-page Report Card for {name} - "
+        "your rating, how you stand against nearby restaurants, "
+        "and the few things quietly costing you orders.",
+        "",
+        kit_observation(lead),
+        "",
+        "I am sending the report card with this message - no "
+        "charge, no obligation. If it is useful, I would love 10 "
+        "minutes to show you how restaurants keep the full amount "
+        "on orders from their own regulars instead of paying "
+        "commission on them.",
+    ]
+    if BMF_WEBSITE:
+        lines += ["", f"More about us: {BMF_WEBSITE}"]
+    lines += ["", f"- {USER_NAME} Tanna, Book My Food"]
+    return "\n".join(lines)
+
+
+def kit_brochure_message(lead):
+    lines = [
+        "And this is our short brochure - what Book My Food does, "
+        "how your own ordering page works, and the 7-day trial we "
+        "start with.",
+        "",
+        "Happy to walk you through it on a short call whenever "
+        "suits you.",
+    ]
+    if BMF_WEBSITE:
+        lines += ["", f"Website: {BMF_WEBSITE}"]
+    return "\n".join(lines)
+
+
+def wa_link(phone, text=None):
+    base = f"https://wa.me/91{phone}"
+    if text:
+        base += "?text=" + urllib.parse.quote(text)
+    return base
+
+
+def mark_kit_sent(conn, phone):
+    now = datetime.now().isoformat(timespec="seconds")
+    conn.execute(
+        "INSERT INTO kit_log (phone, ts, channel) VALUES"
+        " (?, ?, 'whatsapp')", (phone, now))
+    bits = "intro message + report card"
+    if os.path.exists(BROCHURE_PATH):
+        bits += " + brochure"
+    conn.execute(
+        "INSERT INTO crm_remarks (phone, ts, text, source) VALUES"
+        " (?, ?, ?, 'kit')",
+        (phone, now, f"WhatsApp kit sent ({bits})"))
+    conn.commit()
+    lead = fetch_lead(conn, phone)
+    if lead and not lead["followup"]:
+        tomorrow = (date.today() + timedelta(days=1)).isoformat()
+        set_status(conn, phone, lead["status"] or "Not called",
+                   tomorrow)
+    return now
+
+
 # ---------------------------------------------------------------- html helpers
 
 def esc(value):
@@ -560,6 +759,7 @@ ICONS = {
     "flame": '<path d="M8.5 14.5A2.5 2.5 0 0 0 11 12c0-1.38-.5-2-1-3-1.072-2.143-.224-4.054 2-6 .5 2.5 2 4.9 4 6.5 2 1.6 3 3.5 3 5.5a7 7 0 1 1-14 0c0-1.153.433-2.294 1-3a2.5 2.5 0 0 0 2.5 2.5z"/>',
     "check": '<path d="M20 6 9 17l-5-5"/>',
     "calendar": '<rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4"/><path d="M8 2v4"/><path d="M3 10h18"/>',
+    "send": '<path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/>',
 }
 
 
@@ -841,6 +1041,23 @@ tbody tr:hover td, table tr:hover td { background:#F8FAFC; }
 .ringwrap { display:flex; align-items:center; gap:13px; }
 @media (max-width:1080px) { .detail-grid { grid-template-columns:1fr; }
   .searchbox input { width:200px; } }
+.kitmsg { background:#F7F5FC; border:1px solid #E9E4F5;
+  border-radius:12px; padding:13px 15px; font-size:14px;
+  line-height:1.55; white-space:pre-wrap; color:#2A2440; }
+.kitsteps { list-style:none; margin:12px 0 0; padding:0; }
+.kitsteps li { display:flex; gap:11px; padding:10px 0;
+  align-items:flex-start; }
+.kitsteps li + li { border-top:1px solid #EEF1F4; }
+.kitsteps .n { flex:none; width:24px; height:24px; border-radius:50%;
+  background:var(--accent); color:#fff; font-weight:700; font-size:13px;
+  display:flex; align-items:center; justify-content:center;
+  margin-top:1px; }
+.kitthumb { max-height:130px; border-radius:9px;
+  border:1px solid var(--line); display:block; margin-top:7px; }
+.kitrow.sent { opacity:.5; }
+.kittag { background:#DCFCE7; color:#15803D; border-radius:20px;
+  padding:1px 8px; font-size:11.5px; font-weight:700;
+  white-space:nowrap; }
 """
 
 
@@ -855,6 +1072,11 @@ def page(title, active, body, conn=None):
     if conn is not None:
         c = conn.execute("SELECT COUNT(*) c FROM leads").fetchone()["c"]
         total = f"<b>{c}</b> leads in the database"
+    kitbadge = ""
+    if conn is not None:
+        nk = kit_pending_count(conn)
+        if nk:
+            kitbadge = f'<span class="navbadge">{nk}</span>'
 
     def nav(key, href, ic, label, extra=""):
         cls = ' class="active"' if active == key else ""
@@ -873,6 +1095,7 @@ def page(title, active, body, conn=None):
   <nav>
     {nav("dashboard", "/", "grid", "Dashboard")}
     {nav("call", "/call", "phone", "Call Mode")}
+    {nav("kit", "/kit", "send", "Send Kit", kitbadge)}
     {nav("board", "/board", "board", "Pipeline")}
     {nav("leads", "/leads", "users", "All Leads")}
     {nav("followups", "/followups", "clock", "Follow-ups", badge)}
@@ -1164,7 +1387,10 @@ def dashboard_html(conn):
     return body
 
 
-def lead_row(r, next_url):
+def lead_row(r, next_url, kit_ts=None):
+    kittag = (f' <span class="kittag">Kit sent '
+              f'{esc(fmt_date(str(kit_ts)[:10]))}</span>'
+              if kit_ts else "")
     remark = esc((r["last_remark"] or "")[:60])
     if r["n_remarks"]:
         remark += f' <span class="small">({r["n_remarks"]})</span>'
@@ -1174,7 +1400,7 @@ def lead_row(r, next_url):
         f'{monogram(r["name"], r["phone"])}<div>'
         f'<a class="nm" href="/lead?phone={esc(r["phone"])}">'
         f'{esc(r["name"])}</a><div class="an">'
-        f'{esc(r["angle"] or "")}</div></div></div></td>'
+        f'{esc(r["angle"] or "")}{kittag}</div></div></div></td>'
         f'<td>{fmt_phone(r["phone"])}</td>'
         f'<td class="small">{esc((r["address"] or "")[:54])}</td>'
         f'<td>{tier_badge(r["tier"])} <b>{esc(r["score"] or "-")}</b></td>'
@@ -1231,7 +1457,9 @@ placeholder="Name, phone, area, email"></div>
         body += ('<div class="empty">No leads match. Clear the '
                  'filters, or run Vaani to scrape more.</div>')
         return body
-    trs = "".join(lead_row(r, next_url) for r in rows)
+    sent_map = kit_sent_map(conn)
+    trs = "".join(lead_row(r, next_url, sent_map.get(r["phone"]))
+                  for r in rows)
     body += (f"<table><tr><th>Restaurant</th><th>Phone</th>"
              f"<th>Location</th><th>Score</th><th>Status</th>"
              f"<th>Follow-up</th><th>Last remark</th><th>Seen</th></tr>"
@@ -1239,9 +1467,161 @@ placeholder="Name, phone, area, email"></div>
     return body
 
 
+def kit_panel(conn, lead):
+    phone = lead["phone"]
+    head = '<h2 style="margin-top:0">WhatsApp kit</h2>'
+    reason = kit_skip_reason(lead)
+    if reason:
+        return (f'<div class="panel" style="margin-top:16px">{head}'
+                '<div class="small">On the don\'t-pitch list: '
+                f'{esc(reason)}. No kit needed for this one.</div>'
+                '</div>')
+    sent = kit_sent_at(conn, phone)
+    sent_line = ""
+    if sent:
+        sent_line = (f'<div style="color:#15803D;font-weight:600;'
+                     f'margin-bottom:9px">Kit sent on '
+                     f'{esc(fmt_ts(sent))}. You can re-send any '
+                     'time below.</div>')
+    msg = kit_message(lead)
+    card = kit_card_file(phone)
+    if card:
+        card_html = (f'<img class="kitthumb" src="/card?phone='
+                     f'{esc(phone)}"><div class="small">'
+                     f'{esc(os.path.basename(card))} - in the '
+                     'report-cards folder next to the CRM.</div>')
+    elif os.path.exists(REPORT_CARD_SCRIPT):
+        card_html = (f'<form method="post" action="/kit-generate" '
+                     f'style="margin:0"><input type="hidden" '
+                     f'name="phone" value="{esc(phone)}">'
+                     f'<input type="hidden" name="next" '
+                     f'value="/lead?phone={esc(phone)}">'
+                     f'<button class="btn ghost" type="submit">'
+                     f'Generate the report card</button></form>'
+                     f'<div class="small">Takes a few seconds - it '
+                     f'runs the Report Card tool for this lead.</div>')
+    else:
+        card_html = ('<div class="small">report_card.py is not in '
+                     'this folder, so no card yet - the intro and '
+                     'brochure still work.</div>')
+    if os.path.exists(BROCHURE_PATH):
+        bro_html = (f'Attach <b>book-my-food-brochure.pdf</b> (in '
+                    f'this folder, or <a href="/brochure">download '
+                    f'it</a>), then send the follow-up text: '
+                    f'<a class="btn ghost" target="_blank" '
+                    f'href="{esc(wa_link(phone, kit_brochure_message(lead)))}">'
+                    f'Brochure message</a>')
+    else:
+        bro_html = ('<div class="small">The brochure PDF is not in '
+                    'this folder - skip this step.</div>')
+    return f"""<div class="panel" style="margin-top:16px">{head}
+{sent_line}<div class="kitmsg">{esc(msg)}</div>
+<ol class="kitsteps">
+<li><span class="n">1</span><div>
+<a class="btn" target="_blank" href="{esc(wa_link(phone, msg))}">Open WhatsApp with this intro</a>
+<div class="small">The text is filled in for you. Before pressing send, attach the report card (step 2) in the same chat.</div></div></li>
+<li><span class="n">2</span><div><b>Attach the report card</b>{card_html}</div></li>
+<li><span class="n">3</span><div><b>Send the brochure</b><br>{bro_html}</div></li>
+<li><span class="n">4</span><div><form method="post" action="/kit-sent" style="margin:0">
+<input type="hidden" name="phone" value="{esc(phone)}">
+<input type="hidden" name="next" value="/lead?phone={esc(phone)}">
+<button class="btn" type="submit">Mark kit as sent</button>
+<span class="small">Logs it on this lead and sets a call follow-up for tomorrow.</span>
+</form></div></li>
+</ol></div>"""
+
+
+def kit_html(conn):
+    sent_map = kit_sent_map(conn)
+    today = date.today().isoformat()
+    sent_today = [(p, ts) for p, ts in sent_map.items()
+                  if str(ts).startswith(today)]
+    rows = conn.execute(
+        LEAD_SELECT + " WHERE l.suppressed = 0 ORDER BY"
+        " (l.score IS NULL), l.score DESC, l.reviews DESC").fetchall()
+    batch = []
+    for r in rows:
+        if kit_skip_reason(r) or r["phone"] in sent_map:
+            continue
+        batch.append(r)
+        if len(batch) >= 30:
+            break
+    ready = sum(1 for r in batch if kit_card_file(r["phone"]))
+    body = f"""<h1>Send the WhatsApp kit</h1>
+<div class="sub">Your top {len(batch)} pitchable leads who have not
+received the kit yet - best scores first. For each one: open WhatsApp,
+attach the report card, then mark it sent. Pace yourself like a
+person - a few at a time, not all of them in one minute.</div>
+<div class="panel" style="margin:16px 0">
+<b><span id="sentcount">{len(sent_today)}</span> kit(s) sent today</b>
+<span class="small"> - {ready} of these {len(batch)} leads already
+have a report card ready; generate the rest as you go.</span></div>"""
+    if not batch:
+        body += ('<div class="empty">Nothing waiting - every '
+                 'pitchable lead already has the kit. Run Vaani to '
+                 'scrape more leads.</div>')
+    for r in batch:
+        card = kit_card_file(r["phone"])
+        if card:
+            card_bit = '<span class="kittag">Card ready</span>'
+            gen_bit = ""
+        else:
+            card_bit = '<span class="small">No card yet</span>'
+            gen_bit = (f'<form method="post" action="/kit-generate" '
+                       f'style="display:inline;margin:0">'
+                       f'<input type="hidden" name="phone" '
+                       f'value="{esc(r["phone"])}">'
+                       f'<input type="hidden" name="next" '
+                       f'value="/kit"><button class="btn ghost" '
+                       f'type="submit">Generate card</button></form>')
+        body += (
+            f'<div class="taskcard kitrow">'
+            f'{monogram(r["name"], r["phone"])}'
+            f'<div class="grow"><a href="/lead?phone='
+            f'{esc(r["phone"])}"><b>{esc(r["name"])}</b></a> '
+            f'<span class="small">{fmt_phone(r["phone"])}</span><br>'
+            f'<span class="small">{esc(kit_area(r))} - '
+            f'{esc(r["angle"] or "")}</span> {tier_badge(r["tier"])} '
+            f'<span class="small">Score {esc(r["score"] or "-")}'
+            f'</span> {card_bit}</div>'
+            f'<a class="btn" target="_blank" '
+            f'href="{esc(wa_link(r["phone"], kit_message(r)))}">'
+            f'WhatsApp</a>{gen_bit}'
+            f'<button class="btn ghost" onclick="markSent(this,'
+            f'\'{esc(r["phone"])}\')">Mark sent</button></div>')
+    if sent_today:
+        items = ""
+        for p, ts in sorted(sent_today, key=lambda x: x[1]):
+            lead = fetch_lead(conn, p)
+            nm = esc(lead["name"]) if lead else esc(p)
+            items += (f'<div class="small" style="padding:3px 0">'
+                      f'<a href="/lead?phone={esc(p)}">{nm}</a> - '
+                      f'{esc(fmt_ts(ts))}</div>')
+        body += (f'<div class="panel" style="margin-top:16px">'
+                 f'<h2 style="margin-top:0">Sent today</h2>'
+                 f'{items}</div>')
+    body += """<script>
+function markSent(btn, phone) {
+  fetch('/api/kit-sent', {method: 'POST',
+    headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+    body: 'phone=' + encodeURIComponent(phone)})
+  .then(r => r.json()).then(j => {
+    if (j.ok) {
+      btn.closest('.kitrow').classList.add('sent');
+      btn.outerHTML = '<span class="kittag">Sent</span>';
+      var c = document.getElementById('sentcount');
+      c.textContent = parseInt(c.textContent) + 1;
+    }
+  });
+}
+</script>"""
+    return body
+
+
 def lead_html(conn, lead):
     phone = lead["phone"]
     remarks = fetch_remarks(conn, phone)
+    kitp = kit_panel(conn, lead)
     wa = f"https://wa.me/91{phone}" if len(str(phone)) == 10 else "#"
     timeline = ""
     n_notes = 0
@@ -1259,7 +1639,9 @@ def lead_html(conn, lead):
             continue
         n_notes += 1
         tag = (' <span class="tag">from tracker</span>'
-               if r["source"] == "tracker" else "")
+               if r["source"] == "tracker" else
+               ' <span class="tag">whatsapp kit</span>'
+               if r["source"] == "kit" else "")
         timeline += (
             f'<div class="remark"><div class="when">{esc(when)}{tag}'
             f'</div>{esc(r["text"]).replace(chr(10), "<br>")}</div>')
@@ -1325,6 +1707,7 @@ def lead_html(conn, lead):
   </form>
 </div>
 </div>
+{kitp}
 <script>
 function setFU(days){{var d=new Date(); d.setDate(d.getDate()+days);
  var m=('0'+(d.getMonth()+1)).slice(-2), dd=('0'+d.getDate()).slice(-2);
@@ -1611,6 +1994,31 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     self._send(200, page(lead["name"] or "Lead", "leads",
                                          lead_html(conn, lead), conn))
+            elif parsed.path == "/kit":
+                self._send(200, page("Send Kit", "kit",
+                                     kit_html(conn), conn))
+            elif parsed.path == "/card":
+                path = kit_card_file(params.get("phone", ""))
+                if path:
+                    with open(path, "rb") as fh:
+                        self._send(200, fh.read(),
+                                   ctype="image/png")
+                else:
+                    self._send(404, page(
+                        "Not found", "",
+                        "<h1>No report card yet</h1>", conn))
+            elif parsed.path == "/brochure":
+                if os.path.exists(BROCHURE_PATH):
+                    with open(BROCHURE_PATH, "rb") as fh:
+                        self._send(
+                            200, fh.read(), ctype="application/pdf",
+                            extra={"Content-Disposition":
+                                   'attachment; filename='
+                                   '"book-my-food-brochure.pdf"'})
+                else:
+                    self._send(404, page(
+                        "Not found", "",
+                        "<h1>Brochure not in this folder</h1>", conn))
             elif parsed.path == "/followups":
                 self._send(200, page("Follow-ups", "followups",
                                      followups_html(conn), conn))
@@ -1653,6 +2061,25 @@ class Handler(BaseHTTPRequestHandler):
                 if fetch_lead(conn, phone):
                     set_status(conn, phone, form.get("status", ""),
                                form.get("followup", ""))
+                self._redirect(form.get("next") or
+                               f"/lead?phone={phone}")
+            elif parsed.path == "/api/kit-sent":
+                phone = form.get("phone", "")
+                ok = False
+                if fetch_lead(conn, phone):
+                    mark_kit_sent(conn, phone)
+                    ok = True
+                self._json({"ok": ok})
+            elif parsed.path == "/kit-sent":
+                phone = form.get("phone", "")
+                if fetch_lead(conn, phone):
+                    mark_kit_sent(conn, phone)
+                self._redirect(form.get("next") or
+                               f"/lead?phone={phone}")
+            elif parsed.path == "/kit-generate":
+                phone = form.get("phone", "")
+                if fetch_lead(conn, phone):
+                    generate_card(phone)
                 self._redirect(form.get("next") or
                                f"/lead?phone={phone}")
             elif parsed.path == "/remark":
