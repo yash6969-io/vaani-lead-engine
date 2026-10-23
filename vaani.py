@@ -35,7 +35,7 @@ import sqlite3
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
-VERSION = "3.8.0"
+VERSION = "3.9.0"
 UPDATE_URL = ("https://raw.githubusercontent.com/yash6969-io/"
               "vaani-lead-engine/main/vaani.py")
 
@@ -691,6 +691,54 @@ def score_lead(r):
 # and it remembers who must never be contacted again.
 
 MASTER_DB = "vaani_master.db"
+
+# ------------------------------------------------------------------
+# Verticals: restaurant data and healthcare data NEVER share a
+# database. --vertical healthcare routes everything - the master
+# database, the call tracker, the win-back list, the output folder -
+# to healthcare-named files, so a clinic can never land inside the
+# restaurant data (and the restaurant CRM never sees one).
+# ------------------------------------------------------------------
+VERTICALS = {
+    "food": {
+        "label": "Restaurants / Food",
+        "db": "vaani_master.db",
+        "tracker": "vaani-call-tracker.xlsx",
+        "winback": "vaani-not-interested.xlsx",
+        "name_header": "Restaurant name",
+        "names_file": "restaurant_names.csv",
+        "names_col": "restaurant_name",
+        "count_label": "Restaurants in your database",
+        "folder_prefix": "",
+    },
+    "healthcare": {
+        "label": "Healthcare",
+        "db": "vaani_healthcare.db",
+        "tracker": "vaani-healthcare-tracker.xlsx",
+        "winback": "vaani-healthcare-not-interested.xlsx",
+        "name_header": "Clinic / hospital name",
+        "names_file": "clinic_names.csv",
+        "names_col": "clinic_name",
+        "count_label": "Clinics / hospitals in your database",
+        "folder_prefix": "healthcare_",
+    },
+}
+VCFG = VERTICALS["food"]
+HEALTHCARE_HINTS = ("clinic", "hospital", "dental", "dentist",
+                    "doctor", "physio", "diagnostic", "pharmacy",
+                    "nursing", "ayurved", "homeopath")
+
+
+def apply_vertical(name):
+    """Point every data file at the chosen vertical. Called once,
+    from main(), before anything is read or written."""
+    global MASTER_DB, TRACKER_NAME, WINBACK_NAME, VCFG
+    VCFG = VERTICALS[name]
+    MASTER_DB = VCFG["db"]
+    TRACKER_NAME = VCFG["tracker"]
+    WINBACK_NAME = VCFG["winback"]
+    TRACKER_HEADERS[1] = VCFG["name_header"]
+
 SUPPRESS_OUTCOMES = {"Not interested", "Wrong number", "Do not contact"}
 
 
@@ -1315,16 +1363,38 @@ def main():
                     help="hide the browser window while it works")
     ap.add_argument("--no-update", action="store_true",
                     help="skip the automatic update check")
+    ap.add_argument("--vertical", choices=["food", "healthcare"],
+                    default="food",
+                    help="food (default) or healthcare - healthcare "
+                         "leads go into their OWN database "
+                         "(vaani_healthcare.db), never mixed with "
+                         "restaurant data")
     a = ap.parse_args()
     self_update()
+    apply_vertical(a.vertical)
 
     print(f"\n  VAANI LEAD ENGINE v{VERSION}")
     print("  ----------------------")
+    print(f"  Vertical: {VCFG['label']}  (database: {MASTER_DB})")
     location = a.location or input(
         '\n  Type a location (e.g. "Gota, Ahmedabad"): ').strip()
     if not location:
         sys.exit("  No location given - nothing to search.")
     print()
+
+    if a.vertical == "food" and any(h in a.category.lower()
+                                    for h in HEALTHCARE_HINTS):
+        print("  (!) This category sounds like HEALTHCARE, but the")
+        print("      vertical is set to restaurants - these leads")
+        print("      would land in your RESTAURANT database, mixed")
+        print("      with your restaurant leads.")
+        print("      To keep them separate, stop now (Ctrl+C) and")
+        print("      run again with:  --vertical healthcare")
+        try:
+            input("      Press Enter to continue anyway: ")
+        except EOFError:
+            pass
+        print()
 
     rows = scrape(location, a.category, a.max, a.email, a.headless)
     if not rows:
@@ -1409,11 +1479,12 @@ def main():
             "number\n  (landlines don't count). Nothing was saved - try a "
             "different area.\n")
 
-    outdir = os.path.join(HERE,
-                          f"leads_{slug(location)}_{date.today():%Y-%m-%d}")
+    outdir = os.path.join(
+        HERE, f"leads_{VCFG['folder_prefix']}{slug(location)}_"
+              f"{date.today():%Y-%m-%d}")
     os.makedirs(outdir, exist_ok=True)
-    write_csv(os.path.join(outdir, "restaurant_names.csv"),
-              "restaurant_name", names)
+    write_csv(os.path.join(outdir, VCFG["names_file"]),
+              VCFG["names_col"], names)
     write_csv(os.path.join(outdir, "locations.csv"), "location", locations)
     write_csv(os.path.join(outdir, "phone_numbers.csv"), "phone_number",
               phones)
@@ -1434,7 +1505,7 @@ def main():
 
     # ---- summary -----------------------------------------------------------
     print("\n  DONE")
-    print(f"  Restaurants in your database : {len(names)} "
+    print(f"  {VCFG['count_label']} : {len(names)} "
           "(every one has a mobile number)")
     print(f"  Left out - no mobile number  : {skipped_no_phone}")
     if skipped_closed:
@@ -1461,12 +1532,16 @@ def main():
         print(f"                               : in {TRACKER_NAME} - ready "
               "to call, no copy-paste")
     print(f"\n  Your 4 databases are in:\n  {outdir}")
-    print("    - restaurant_names.csv")
+    print(f"    - {VCFG['names_file']}")
     print("    - locations.csv")
     print("    - phone_numbers.csv   (mobiles only)")
     print("    - email_ids.csv")
     if excel_done:
         print("    - all_leads.xlsx      (everything combined)")
+    if a.vertical == "healthcare":
+        print("\n  Saved under HEALTHCARE (vaani_healthcare.db) - "
+              "your restaurant")
+        print("  data was not touched.")
     print()
 
 
