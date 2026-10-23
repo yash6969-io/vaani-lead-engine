@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Vaani CRM v1.4
+Vaani CRM v1.5
 ==============
 A personal CRM for the leads Vaani scrapes - just for you, on your own
 computer. Excel was never built for follow-ups, remarks and daily call
@@ -34,7 +34,7 @@ DB_PATH = os.path.join(HERE, "vaani_master.db")
 TRACKER_PATH = os.path.join(HERE, "vaani-call-tracker.xlsx")
 BACKUP_PATH = os.path.join(HERE, "vaani_master.db.crm-backup")
 
-VERSION = "1.4.1"
+VERSION = "1.5.0"
 UPDATE_URL = ("https://raw.githubusercontent.com/yash6969-io/"
               "vaani-lead-engine/main/vaani_crm.py")
 PORTS = (8765, 8766, 8767, 8768, 8769)
@@ -49,6 +49,50 @@ BMF_WEBSITE = "https://bookmyfood.si/"
 KIT_SEND_SCRIPT = os.path.join(HERE, "kit_send.py")
 KIT_SEND_URL = ("https://raw.githubusercontent.com/yash6969-io/"
                 "vaani-lead-engine/main/kit_send.py")
+
+# ------------------------------------------------------------------
+# Section (v1.5): this same program serves two separate worlds.
+#   Restaurants (default): vaani_master.db, ports 8765-8769, the
+#     Book My Food kit (report card + brochure).
+#   Healthcare (--section healthcare): vaani_healthcare.db, ports
+#     8770-8774, the Content365 kit (Content & Trust Report, no
+#     brochure - the sample-posts link travels inside the message).
+# The two databases never mix: each section is its own CRM, with
+# its own leads, statuses, remarks and kit log.
+SECTION = "food"
+if "--section" in sys.argv:
+    _si = sys.argv.index("--section")
+    if _si + 1 < len(sys.argv) and sys.argv[_si + 1] == "healthcare":
+        SECTION = "healthcare"
+HEALTHCARE = SECTION == "healthcare"
+if HEALTHCARE:
+    DB_PATH = os.path.join(HERE, "vaani_healthcare.db")
+    TRACKER_PATH = os.path.join(HERE, "vaani-healthcare-tracker.xlsx")
+    BACKUP_PATH = os.path.join(HERE, "vaani_healthcare.db.crm-backup")
+    PORTS = (8770, 8771, 8772, 8773, 8774)
+    REPORT_CARD_SCRIPT = os.path.join(HERE, "clinic_report.py")
+    REPORT_CARDS_DIR = os.path.join(HERE, "clinic-reports")
+SECTION_LABEL = "Healthcare" if HEALTHCARE else "Restaurants"
+SECTION_SUB = "Healthcare · Content365" if HEALTHCARE \
+    else "Lead manager"
+APP_TITLE = "Vaani CRM · Healthcare" if HEALTHCARE else "Vaani CRM"
+OTHER_URL = ("http://127.0.0.1:8765/" if HEALTHCARE
+             else "http://127.0.0.1:8770/")
+OTHER_LABEL = ("Restaurants section" if HEALTHCARE
+               else "Healthcare section")
+C365_WEBSITE = "https://content365.si/"
+C365_SAMPLES = "https://content365.si/industries/"
+CLINIC_REPORT_URL = ("https://raw.githubusercontent.com/yash6969-io/"
+                     "vaani-lead-engine/main/clinic_report.py")
+CLINIC_CHAINS = ("apollo", "fortis", "manipal", "medanta",
+                 "max hospital", "narayana", "cloudnine",
+                 "columbia asia", "dr batra", "kaya", "vlcc", "oliva",
+                 "clove dental", "sabka dentist", "toothsi", "dentzz",
+                 "partha dental", "vasan", "dr agarwal",
+                 "centre for sight", "kokilaben", "hinduja",
+                 "rainbow hospitals", "motherhood", "thyrocare",
+                 "dr lal", "metropolis diagnostics", "kims hospital",
+                 "yashoda", "care hospitals", "aster", "wockhardt")
 
 STATUSES = ["Not called", "No answer", "Staff reached",
             "Decision-maker reached", "Conversation", "Interested",
@@ -259,6 +303,7 @@ def import_tracker(conn):
             for c in range(1, (ws.max_column or 0) + 1):
                 v = ws.cell(row=1, column=c).value
                 if v in ("Phone", "Outcome", "Restaurant name",
+                         "Clinic / hospital name",
                          "Location", "Email", "Notes",
                          "Callback date") and v not in headers:
                     headers[v] = c  # first match wins (the summary
@@ -273,7 +318,9 @@ def import_tracker(conn):
                 if not keys:
                     continue
                 info = {"outcome": outcome or "Not called"}
-                for field, col in (("name", "Restaurant name"),
+                for field, col in (("name", "Clinic / hospital name"
+                                    if HEALTHCARE else
+                                    "Restaurant name"),
                                    ("location", "Location"),
                                    ("email", "Email"),
                                    ("notes", "Notes")):
@@ -510,12 +557,17 @@ def kit_skip_reason(lead):
     """The Report Card generator's don't-pitch screen, plus CRM
     terminal statuses. '' means: pitch this lead."""
     name_low = (lead["name"] or "").lower()
-    if any(c in name_low for c in KIT_CHAINS):
-        return "National chain - decisions are centralised"
+    chains = CLINIC_CHAINS if HEALTHCARE else KIT_CHAINS
+    if any(c in name_low for c in chains):
+        return ("Chain / hospital group - marketing is centralised"
+                if HEALTHCARE else
+                "National chain - decisions are centralised")
     if lead["suppressed"]:
         return "Marked " + (lead["suppress_reason"] or "suppressed")
     if (lead["status"] or "") in TERMINAL_STATUSES:
         return "Already closed: " + lead["status"]
+    if HEALTHCARE:
+        return ""
     if ((lead["angle"] or "").strip() == "Operations upgrade"
             and (lead["rating"] or 0) >= 4.2
             and (lead["reviews"] or 0) >= 200):
@@ -535,11 +587,36 @@ def kit_card_file(phone):
     return None
 
 
+def ensure_clinic_report():
+    """clinic_report.py lives next to the CRM in Healthcare mode.
+    If it is not there yet, fetch it from the same GitHub repo the
+    CRM updates itself from - same sanity checks as the updater."""
+    if os.path.exists(REPORT_CARD_SCRIPT):
+        return True
+    try:
+        req = urllib.request.Request(
+            CLINIC_REPORT_URL, headers={"User-Agent": "VaaniCRM"})
+        with urllib.request.urlopen(req, timeout=15) as r:
+            content = r.read().decode("utf-8", "replace")
+    except Exception:
+        return False
+    if "Vaani Clinic Report" not in content or len(content) < 10000:
+        return False
+    try:
+        compile(content, "clinic_report.py", "exec")
+        with open(REPORT_CARD_SCRIPT, "w", encoding="utf-8") as f:
+            f.write(content)
+    except Exception:
+        return False
+    return True
+
+
 def generate_card(phone):
     """Run the Report Card generator for one lead; True when a card
     PNG exists afterwards."""
     if not os.path.exists(REPORT_CARD_SCRIPT):
-        return False
+        if not (HEALTHCARE and ensure_clinic_report()):
+            return False
     try:
         subprocess.run([sys.executable, REPORT_CARD_SCRIPT,
                         str(phone), "--no-update"], cwd=HERE,
@@ -601,6 +678,8 @@ def kit_observation(lead):
 
 
 def kit_message(lead):
+    if HEALTHCARE:
+        return clinic_kit_message(lead)
     name = lead["name"] or "your restaurant"
     lines = [
         f"Namaste {name} team, this is {USER_NAME} Tanna from "
@@ -626,6 +705,64 @@ def kit_message(lead):
     if BMF_WEBSITE:
         lines += ["", f"More about us: {BMF_WEBSITE}"]
     lines += ["", f"- {USER_NAME} Tanna, Book My Food"]
+    return "\n".join(lines)
+
+
+def clinic_observation(lead):
+    reviews = lead["reviews"] or 0
+    if not (lead["website"] or "").strip():
+        return ("One thing I noticed: your clinic has no website, "
+                "so a patient who wants to check your treatments "
+                "or timings finds only the Google listing - and "
+                "nothing after it.")
+    if reviews >= 300:
+        return (f"One thing I noticed: {reviews:,} patients have "
+                "reviewed you on Google, but that proof sits only "
+                "on Google - it never reaches the patients "
+                "scrolling every day.")
+    if lead["rating"]:
+        return (f"One thing I noticed: at {lead['rating']} stars, "
+                "patients clearly trust your care - but between "
+                "reviews there is nothing new for the next patient "
+                "to see.")
+    return ("One thing I noticed: patients check a clinic online "
+            "before their first visit - and right now there is "
+            "very little for them to find.")
+
+
+def clinic_kit_message(lead):
+    name = lead["name"] or "your clinic"
+    lines = [
+        f"Namaste {name} team, this is {USER_NAME} Tanna from "
+        "Content365.",
+        "",
+        "This is for the doctor - I would be grateful if you "
+        "could pass it on.",
+        "",
+        "A little about us: Content365 makes a full year of "
+        "ready-to-post content for clinics - 365 branded posts "
+        "with your clinic's name, logo and phone on every post, "
+        "captions for Instagram, Facebook and more in English "
+        "and Hindi, and health days and festivals posted on the "
+        "right day. You simply approve and post.",
+        "",
+        clinic_observation(lead),
+        "",
+        f"I am sharing two things right after this message - a "
+        f"free one-page Content & Trust Report on how {name} "
+        f"looks online today, and sample posts we made for "
+        f"clinics like yours, here: {C365_SAMPLES} - please do "
+        f"check them out.",
+        "",
+        "If you like them, I will make your first 7 days of "
+        "posts with your clinic's own name and logo - free. "
+        "The full year is \u20B93,999 including GST, only if "
+        "you want it.",
+        "",
+        f"More about us: {C365_WEBSITE}",
+        "",
+        f"- {USER_NAME} Tanna, Content365",
+    ]
     return "\n".join(lines)
 
 
@@ -656,7 +793,7 @@ def mark_kit_sent(conn, phone):
         "INSERT INTO kit_log (phone, ts, channel) VALUES"
         " (?, ?, 'whatsapp')", (phone, now))
     bits = "intro message, report card"
-    if os.path.exists(BROCHURE_PATH):
+    if not HEALTHCARE and os.path.exists(BROCHURE_PATH):
         bits += ", brochure"
     conn.execute(
         "INSERT INTO crm_remarks (phone, ts, text, source) VALUES"
@@ -696,10 +833,10 @@ def ensure_kit_sender():
 
 
 def autosend_kit(conn, phone):
-    """Send the whole kit - intro + report card + brochure, together -
-    through WhatsApp Web via kit_send.py. Returns (ok, message).
-    Both files or nothing: if either is missing and cannot be made,
-    nothing is sent."""
+    """Send the whole kit through WhatsApp Web via kit_send.py,
+    in order: the intro, the report card, then the brochure (food
+    section only). Returns (ok, message). Complete or nothing: if
+    a piece is missing and cannot be made, nothing is sent."""
     lead = fetch_lead(conn, phone)
     if not lead:
         return False, "Lead not found."
@@ -715,12 +852,18 @@ def autosend_kit(conn, phone):
         generate_card(phone)
         card = kit_card_file(phone)
     if not card:
-        return False, ("The report card could not be generated for "
+        noun = ("Content & Trust Report" if HEALTHCARE
+                else "report card")
+        return False, (f"The {noun} could not be generated for "
                        "this lead, so nothing was sent.")
-    if not os.path.exists(BROCHURE_PATH):
+    if HEALTHCARE:
+        brochure_arg = "-"
+    elif not os.path.exists(BROCHURE_PATH):
         return False, ("book-my-food-brochure.pdf is not in this "
                        "folder - the kit is only sent complete, so "
                        "nothing was sent.")
+    else:
+        brochure_arg = BROCHURE_PATH
     caption_path = os.path.join(HERE, "kit_caption.txt")
     try:
         with open(caption_path, "w", encoding="utf-8") as f:
@@ -730,7 +873,7 @@ def autosend_kit(conn, phone):
     try:
         proc = subprocess.run(
             [sys.executable, KIT_SEND_SCRIPT, str(phone), card,
-             BROCHURE_PATH, caption_path],
+             brochure_arg, caption_path],
             cwd=HERE, capture_output=True, text=True, timeout=420)
         out = (proc.stdout or "") + (proc.stderr or "")
     except subprocess.TimeoutExpired:
@@ -1197,12 +1340,12 @@ def page(title, active, body, conn=None):
     return f"""<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{esc(title)} - Vaani CRM</title><style>{CSS}</style></head>
+<title>{esc(title)} - {esc(APP_TITLE)}</title><style>{CSS}</style></head>
 <body>
 <aside class="sidebar">
   <div class="brand"><div class="logo">V</div>
     <div><div class="t1">Vaani CRM</div>
-    <div class="t2">Lead manager</div></div></div>
+    <div class="t2">{esc(SECTION_SUB)}</div></div></div>
   <nav>
     {nav("dashboard", "/", "grid", "Dashboard")}
     {nav("call", "/call", "phone", "Call Mode")}
@@ -1211,8 +1354,9 @@ def page(title, active, body, conn=None):
     {nav("leads", "/leads", "users", "All Leads")}
     {nav("followups", "/followups", "clock", "Follow-ups", badge)}
     {nav("export", "/export.csv", "download", "Export CSV")}
+    {nav("section", OTHER_URL, "users", OTHER_LABEL)}
   </nav>
-  <div class="side-foot">{total}<br>Vaani CRM v{VERSION}<br>
+  <div class="side-foot">{total}<br>Vaani CRM v{VERSION} · {esc(SECTION_LABEL)}<br>
   Data stays on this PC</div>
 </aside>
 <div class="shell">
@@ -1306,12 +1450,19 @@ def dashboard_html(conn):
     today = date.today()
     date_line = datetime.now().strftime("%A, %d %B %Y")
     if total == 0:
+        if HEALTHCARE:
+            hint = ('Run a healthcare search - <b>py vaani.py '
+                    '--vertical healthcare --category "Dental '
+                    'clinics"</b> - and every clinic it scrapes '
+                    'will appear here automatically.')
+        else:
+            hint = ('Run Vaani once (double-click '
+                    '<b>run-vaani.bat</b>) and every restaurant '
+                    'it scrapes will appear here automatically.')
         return (f"<h1>{greeting()}, {esc(USER_NAME)}</h1>"
                 f'<div class="sub">{date_line}</div>'
-                '<div class="empty" style="margin-top:18px">No leads '
-                'yet.<br>Run Vaani once (double-click <b>run-vaani.bat'
-                '</b>) and every restaurant it scrapes will appear '
-                'here automatically.</div>')
+                '<div class="empty" style="margin-top:18px">'
+                f'No leads yet.<br>{hint}</div>')
     counts = {}
     for row in conn.execute(
             "SELECT COALESCE(s.status, 'Not called') st, COUNT(*) c"
@@ -1571,7 +1722,7 @@ placeholder="Name, phone, area, email"></div>
     sent_map = kit_sent_map(conn)
     trs = "".join(lead_row(r, next_url, sent_map.get(r["phone"]))
                   for r in rows)
-    body += (f"<table><tr><th>Restaurant</th><th>Phone</th>"
+    body += (f"<table><tr><th>{'Clinic' if HEALTHCARE else 'Restaurant'}</th><th>Phone</th>"
              f"<th>Location</th><th>Score</th><th>Status</th>"
              f"<th>Follow-up</th><th>Last remark</th><th>Seen</th></tr>"
              f"{trs}</table>")
@@ -1600,7 +1751,8 @@ def kit_panel(conn, lead):
         card_html = (f'<img class="kitthumb" src="/card?phone='
                      f'{esc(phone)}"><div class="small">'
                      f'{esc(os.path.basename(card))} - in the '
-                     'report-cards folder next to the CRM.</div>')
+                     f'{esc(os.path.basename(REPORT_CARDS_DIR))} '
+                     'folder next to the CRM.</div>')
     elif os.path.exists(REPORT_CARD_SCRIPT):
         card_html = (f'<form method="post" action="/kit-generate" '
                      f'style="margin:0"><input type="hidden" '
@@ -1612,40 +1764,64 @@ def kit_panel(conn, lead):
                      f'<div class="small">Takes a few seconds - it '
                      f'runs the Report Card tool for this lead.</div>')
     else:
-        card_html = ('<div class="small">report_card.py is not in '
-                     'this folder, so no card yet - the intro and '
-                     'brochure still work.</div>')
-    if os.path.exists(BROCHURE_PATH):
-        bro_html = (f'Attach <b>book-my-food-brochure.pdf</b> (in '
-                    f'this folder, or <a href="/brochure">download '
-                    f'it</a>), then send the follow-up text: '
-                    f'<a class="btn ghost" target="_blank" '
-                    f'href="{esc(wa_link(phone, kit_brochure_message(lead)))}">'
-                    f'Brochure message</a>')
-    else:
-        bro_html = ('<div class="small">The brochure PDF is not in '
-                    'this folder - skip this step.</div>')
-    if os.path.exists(BROCHURE_PATH):
+        tail = ('the intro still works.' if HEALTHCARE else
+                'the intro and brochure still work.')
+        card_html = (f'<div class="small">'
+                     f'{esc(os.path.basename(REPORT_CARD_SCRIPT))} '
+                     f'is not in this folder, so no card yet - '
+                     f'{tail}</div>')
+    if HEALTHCARE:
+        bro_html = ""
         auto_block = f"""<div style="background:#ECFDF5;border:1px solid #A6F4C5;border-radius:12px;padding:14px 16px;margin-bottom:14px">
+<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+<button class="btn" type="button" onclick="autosend(this,'{esc(phone)}')">Send kit automatically</button>
+<span class="small">Sends in order: the intro message (the sample-posts link travels inside it), then his Content &amp; Trust Report.</span></div>
+<div class="small" style="margin-top:7px">Opens WhatsApp Web in a Chrome window and sends it for you, then logs it here and sets tomorrow's follow-up. The first time only, scan the QR code in that window with your phone (WhatsApp &gt; Linked devices). Keep the window open until it finishes.</div></div>"""
+        bro_step = ""
+        mark_n = 3
+        step1_note = ("Send this message first - it carries the "
+                      "sample-posts link. Then attach his Content "
+                      "&amp; Trust Report (step 2) in the same chat.")
+        card_noun = "Content &amp; Trust Report"
+    else:
+        if os.path.exists(BROCHURE_PATH):
+            bro_html = (f'Attach <b>book-my-food-brochure.pdf</b> '
+                        f'(in this folder, or <a href="/brochure">'
+                        f'download it</a>), then send the follow-up '
+                        f'text: <a class="btn ghost" target="_blank" '
+                        f'href="{esc(wa_link(phone, kit_brochure_message(lead)))}">'
+                        f'Brochure message</a>')
+        else:
+            bro_html = ('<div class="small">The brochure PDF is '
+                        'not in this folder - skip this step.</div>')
+        if os.path.exists(BROCHURE_PATH):
+            auto_block = f"""<div style="background:#ECFDF5;border:1px solid #A6F4C5;border-radius:12px;padding:14px 16px;margin-bottom:14px">
 <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
 <button class="btn" type="button" onclick="autosend(this,'{esc(phone)}')">Send kit automatically</button>
 <span class="small">Sends in order: the intro message, then the report card, then the brochure.</span></div>
 <div class="small" style="margin-top:7px">Opens WhatsApp Web in a Chrome window and sends it for you, then logs it here and sets tomorrow's follow-up. The first time only, scan the QR code in that window with your phone (WhatsApp &gt; Linked devices). Keep the window open until it finishes.</div></div>"""
-    else:
-        auto_block = ('<div class="small" style="margin-bottom:12px">'
-                      'Auto-send is off: the brochure PDF is not in '
-                      'this folder, and the kit only goes out '
-                      'complete.</div>')
+        else:
+            auto_block = ('<div class="small" '
+                          'style="margin-bottom:12px">Auto-send is '
+                          'off: the brochure PDF is not in this '
+                          'folder, and the kit only goes out '
+                          'complete.</div>')
+        bro_step = (f'<li><span class="n">3</span><div><b>Send '
+                    f'the brochure</b><br>{bro_html}</div></li>')
+        mark_n = 4
+        step1_note = ("Send this message first. Then attach the "
+                      "report card (step 2) and the brochure "
+                      "(step 3) in the same chat, in that order.")
+        card_noun = "report card"
     return f"""<div class="panel" style="margin-top:16px">{head}
 {sent_line}{auto_block}<div class="kitmsg">{esc(msg)}</div>
 <div class="small" style="margin:14px 0 0"><b>Or send it yourself, step by step:</b></div>
 <ol class="kitsteps">
 <li><span class="n">1</span><div>
 <a class="btn" target="_blank" href="{esc(wa_link(phone, msg))}">Open WhatsApp with this intro</a>
-<div class="small">Send this message first. Then attach the report card (step 2) and the brochure (step 3) in the same chat, in that order.</div></div></li>
-<li><span class="n">2</span><div><b>Attach the report card</b>{card_html}</div></li>
-<li><span class="n">3</span><div><b>Send the brochure</b><br>{bro_html}</div></li>
-<li><span class="n">4</span><div><form method="post" action="/kit-sent" style="margin:0">
+<div class="small">{step1_note}</div></div></li>
+<li><span class="n">2</span><div><b>Attach the {card_noun}</b>{card_html}</div></li>
+{bro_step}<li><span class="n">{mark_n}</span><div><form method="post" action="/kit-sent" style="margin:0">
 <input type="hidden" name="phone" value="{esc(phone)}">
 <input type="hidden" name="next" value="/lead?phone={esc(phone)}">
 <button class="btn" type="submit">Mark kit as sent</button>
@@ -1659,9 +1835,12 @@ def kit_html(conn):
     today = date.today().isoformat()
     sent_today = [(p, ts) for p, ts in sent_map.items()
                   if str(ts).startswith(today)]
+    order = (" (l.reviews IS NULL), l.reviews DESC, l.rating DESC"
+             if HEALTHCARE else
+             " (l.score IS NULL), l.score DESC, l.reviews DESC")
     rows = conn.execute(
         LEAD_SELECT + " WHERE l.suppressed = 0 ORDER BY"
-        " (l.score IS NULL), l.score DESC, l.reviews DESC").fetchall()
+        + order).fetchall()
     batch = []
     for r in rows:
         if kit_skip_reason(r) or r["phone"] in sent_map:
@@ -1670,15 +1849,29 @@ def kit_html(conn):
         if len(batch) >= 30:
             break
     ready = sum(1 for r in batch if kit_card_file(r["phone"]))
+    if HEALTHCARE:
+        sub = (f"Your top {len(batch)} pitchable clinics who have "
+               "not received the kit yet - most-reviewed first. "
+               "<b>Auto-send kit</b> opens WhatsApp Web and sends, "
+               "in order, the intro message (the sample-posts link "
+               "travels inside it) and his Content &amp; Trust "
+               "Report, then logs it and sets tomorrow's call "
+               "follow-up. The WhatsApp button is the manual way "
+               "(message prefilled, you attach the report). Pace "
+               "yourself like a person - a few at a time, not all "
+               "of them in one minute.")
+    else:
+        sub = (f"Your top {len(batch)} pitchable leads who have "
+               "not received the kit yet - best scores first. "
+               "<b>Auto-send kit</b> opens WhatsApp Web and sends, "
+               "in order, the intro message, his report card and "
+               "the brochure, then logs it and sets tomorrow's "
+               "call follow-up. The WhatsApp button is the manual "
+               "way (message prefilled, you attach the files). "
+               "Pace yourself like a person - a few at a time, "
+               "not all of them in one minute.")
     body = f"""<h1>Send the WhatsApp kit</h1>
-<div class="sub">Your top {len(batch)} pitchable leads who have not
-received the kit yet - best scores first. <b>Auto-send kit</b> opens
-WhatsApp Web and sends, in order, the intro message, his report
-card and the brochure, then logs it and sets tomorrow's call
-follow-up. The
-WhatsApp button is the manual way (message prefilled, you attach the
-files). Pace yourself like a person - a few at a time, not all of
-them in one minute.</div>
+<div class="sub">{sub}</div>
 <div class="panel" style="margin:16px 0">
 <b><span id="sentcount">{len(sent_today)}</span> kit(s) sent today</b>
 <span class="small"> - {ready} of these {len(batch)} leads already
@@ -1701,16 +1894,25 @@ have a report card ready; generate the rest as you go.</span></div>"""
                        f'<input type="hidden" name="next" '
                        f'value="/kit"><button class="btn ghost" '
                        f'type="submit">Generate card</button></form>')
+        if HEALTHCARE:
+            meta = (f'{esc(kit_area(r))} - '
+                    f'{esc(r["rating"] or "-")}&#9733; &middot; '
+                    f'{esc(r["reviews"] or 0)} reviews')
+            badges = ""
+        else:
+            meta = (f'{esc(kit_area(r))} - '
+                    f'{esc(r["angle"] or "")}')
+            badges = (f' {tier_badge(r["tier"])} '
+                      f'<span class="small">Score '
+                      f'{esc(r["score"] or "-")}</span>')
         body += (
             f'<div class="taskcard kitrow">'
             f'{monogram(r["name"], r["phone"])}'
             f'<div class="grow"><a href="/lead?phone='
             f'{esc(r["phone"])}"><b>{esc(r["name"])}</b></a> '
             f'<span class="small">{fmt_phone(r["phone"])}</span><br>'
-            f'<span class="small">{esc(kit_area(r))} - '
-            f'{esc(r["angle"] or "")}</span> {tier_badge(r["tier"])} '
-            f'<span class="small">Score {esc(r["score"] or "-")}'
-            f'</span> {card_bit}</div>'
+            f'<span class="small">{meta}</span>{badges} '
+            f'{card_bit}</div>'
             f'<button class="btn" onclick="autosend(this,'
             f'\'{esc(r["phone"])}\')">Auto-send kit</button>'
             f'<a class="btn ghost" target="_blank" '
@@ -2047,7 +2249,7 @@ def export_csv_text(conn):
     import io
     buf = io.StringIO()
     w = csv.writer(buf)
-    w.writerow(["Restaurant Name", "Phone", "Location", "Email",
+    w.writerow([("Clinic Name" if HEALTHCARE else "Restaurant Name"), "Phone", "Location", "Email",
                 "Website", "Rating", "Reviews", "Score", "Tier",
                 "Pitch Angle", "Status", "Follow-up Date", "Remarks",
                 "First Seen", "Last Seen", "Times Seen"])
@@ -2138,7 +2340,12 @@ class Handler(BaseHTTPRequestHandler):
                         "Not found", "",
                         "<h1>No report card yet</h1>", conn))
             elif parsed.path == "/brochure":
-                if os.path.exists(BROCHURE_PATH):
+                if HEALTHCARE:
+                    self._send(404, page(
+                        "Not found", "",
+                        "<h1>No brochure in the Healthcare "
+                        "section</h1>", conn))
+                elif os.path.exists(BROCHURE_PATH):
                     with open(BROCHURE_PATH, "rb") as fh:
                         self._send(
                             200, fh.read(), ctype="application/pdf",
@@ -2245,12 +2452,13 @@ def main():
         except OSError:
             continue
     if server is None:
-        print("  Could not start Vaani CRM - ports 8765-8769 are busy.")
+        print(f"  Could not start Vaani CRM - ports "
+              f"{PORTS[0]}-{PORTS[-1]} are busy.")
         print("  Close the other copy of Vaani CRM and try again.")
         return
     url = f"http://127.0.0.1:{server.server_address[1]}/"
     print()
-    print(f"  VAANI CRM v{VERSION}")
+    print(f"  VAANI CRM v{VERSION}  ({SECTION_LABEL} section)")
     print("  ----------------------")
     if imported:
         print(f"  Imported {imported} lead(s) from your Excel tracker"
