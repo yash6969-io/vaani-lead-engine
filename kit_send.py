@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
-"""Vaani Kit Sender v1.0.2 - sends ONE WhatsApp kit through
+"""Vaani Kit Sender v1.1.0 - sends ONE WhatsApp kit through
 WhatsApp Web, for the Vaani CRM's Auto-send button, as three
 messages in this order:
 
     1. the intro / greeting text (the file passed as caption.txt)
     2. the report card image
     3. the brochure PDF
+
+    (Pass - instead of a brochure file to send only 1 and 2 - the
+    healthcare kit works that way: intro + Content & Trust Report.)
 
     py kit_send.py <phone10> <card.png> <brochure.pdf> <intro.txt>
 
@@ -35,7 +38,7 @@ import subprocess
 import sys
 import urllib.request
 
-VERSION = "1.0.2"
+VERSION = "1.1.0"
 UPDATE_URL = ("https://raw.githubusercontent.com/yash6969-io/"
               "vaani-lead-engine/main/kit_send.py")
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -325,14 +328,18 @@ def send_kit(phone, card_png, brochure_pdf, intro_text):
                           "brochure was not sent either.")
             ctx.close()
             return rc
-        step("Sending the brochure")
-        if not send_file(pg, brochure_pdf, "application/pdf"):
-            rc = fail(pg, "The introduction and report card went, "
-                          "but the brochure could not be "
-                          "attached.")
-            ctx.close()
-            return rc
-        step("Kit sent - text, report card and brochure, in order")
+        if brochure_pdf:
+            step("Sending the brochure")
+            if not send_file(pg, brochure_pdf, "application/pdf"):
+                rc = fail(pg, "The introduction and report card "
+                              "went, but the brochure could not "
+                              "be attached.")
+                ctx.close()
+                return rc
+            step("Kit sent - text, report card and brochure, "
+                 "in order")
+        else:
+            step("Kit sent - text and report card, in order")
         print("SENT", flush=True)
         pg.wait_for_timeout(1200)
         ctx.close()
@@ -351,7 +358,9 @@ def main():
         return fail(None, "Bad phone number.")
     if not os.path.exists(card_png):
         return fail(None, f"Report card file not found: {card_png}")
-    if not os.path.exists(brochure_pdf):
+    if brochure_pdf in ("-", ""):
+        brochure_pdf = None
+    elif not os.path.exists(brochure_pdf):
         return fail(None, f"Brochure file not found: {brochure_pdf}")
     try:
         with open(intro_file, encoding="utf-8") as f:
