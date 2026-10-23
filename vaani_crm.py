@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Vaani CRM v1.2
+Vaani CRM v1.3
 ==============
 A personal CRM for the leads Vaani scrapes - just for you, on your own
 computer. Excel was never built for follow-ups, remarks and daily call
@@ -34,7 +34,7 @@ DB_PATH = os.path.join(HERE, "vaani_master.db")
 TRACKER_PATH = os.path.join(HERE, "vaani-call-tracker.xlsx")
 BACKUP_PATH = os.path.join(HERE, "vaani_master.db.crm-backup")
 
-VERSION = "1.3.0"
+VERSION = "1.3.1"
 UPDATE_URL = ("https://raw.githubusercontent.com/yash6969-io/"
               "vaani-lead-engine/main/vaani_crm.py")
 PORTS = (8765, 8766, 8767, 8768, 8769)
@@ -45,7 +45,7 @@ USER_NAME = "Yash"
 REPORT_CARD_SCRIPT = os.path.join(HERE, "report_card.py")
 REPORT_CARDS_DIR = os.path.join(HERE, "report-cards")
 BROCHURE_PATH = os.path.join(HERE, "book-my-food-brochure.pdf")
-BMF_WEBSITE = ""
+BMF_WEBSITE = "https://bookmyfood.si/"
 
 STATUSES = ["Not called", "No answer", "Staff reached",
             "Decision-maker reached", "Conversation", "Interested",
