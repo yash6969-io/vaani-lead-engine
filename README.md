@@ -142,6 +142,52 @@ clinic. If you forget the flag and search a clinic-like category,
 Vaani warns you before anything is saved and tells you the right
 command.
 
+## Delivery-first mid-tier segment (`--segment delivery`)
+
+Restaurants only. Adds one extra file to the run folder,
+`delivery_leads.xlsx` — the places most likely to feel aggregator
+commission and to say yes to their own ordering channel. Nothing is
+removed from the normal outputs, the tracker or the database; this is
+a focused call list on top of them.
+
+A lead qualifies only if it meets **all** of these:
+
+- **Delivery listed AND dine-in listed** on Maps — it lives on
+  delivery and has a real dining room too.
+- **Not a chain** and **not a cart / stall / kiosk** — no scaled
+  brands, no tiny vendors with no dining or delivery setup.
+- **Not too popular:** 30–1500 reviews, and never a near-perfect
+  rating (4.7+) with 500+ reviews — those are the famous,
+  dining-led brands.
+- **Loyal-base evidence:** at least 30 reviews and a rating of 3.8
+  or more, so regulars are demonstrably coming back.
+- **Commission pain visible:** on Swiggy/Zomato, or no direct
+  ordering found.
+- **Everyday prices:** Maps shows ₹ or ₹₹ (budget-to-moderate).
+  ₹₹₹/₹₹₹₹ places are left out. When Maps shows no price band, the
+  lead still qualifies but is marked "Price unknown - check menu",
+  and the summary tells you how many need a menu check.
+
+Run it like this:
+
+```
+py vaani.py --segment delivery --location "Prahlad Nagar, Ahmedabad"
+```
+
+The end-of-run summary prints the segment count, how many are
+price-known vs price-unknown, and why the rest were left out
+(no delivery, no dine-in, too popular, premium price, ...) so you can
+see whether the thresholds fit your area. For the repeat-orders-from-
+offices effect, run it in office-dense areas — business districts,
+IT parks, commercial streets — where the same people order lunch
+every day.
+
+Honest limits: Maps' ₹ level is a rough band, not dish prices, so
+₹100–400 is approximated, not proven per dish. "Loyal base" and
+"commission pain" are proxies from public signals, not certainties —
+the segment file shows the reason for every lead so you can judge
+each one before calling.
+
 ## Honest notes
 
 - **Only restaurants WITH a mobile number are saved.** If a restaurant
