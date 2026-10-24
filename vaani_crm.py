@@ -34,7 +34,7 @@ DB_PATH = os.path.join(HERE, "vaani_master.db")
 TRACKER_PATH = os.path.join(HERE, "vaani-call-tracker.xlsx")
 BACKUP_PATH = os.path.join(HERE, "vaani_master.db.crm-backup")
 
-VERSION = "1.5.2"
+VERSION = "1.5.3"
 UPDATE_URL = ("https://raw.githubusercontent.com/yash6969-io/"
               "vaani-lead-engine/main/vaani_crm.py")
 PORTS = (8765, 8766, 8767, 8768, 8769)
@@ -1681,21 +1681,30 @@ def lead_row(r, next_url, kit_ts=None):
     if r["n_remarks"]:
         remark += f' <span class="small">({r["n_remarks"]})</span>'
     fu = followup_chip(r) or fmt_date(r["followup"])
+    # Remember the filtered list this row was clicked from, so the
+    # lead page can send the user back to exactly this view instead
+    # of the unfiltered default. Only when filters are actually on.
+    back_q = ""
+    if next_url != "/leads":
+        back_q = ("&amp;back=" +
+                  urllib.parse.quote(next_url, safe=""))
     return (
         f'<tr><td><div class="name-cell">'
         f'{monogram(r["name"], r["phone"])}<div>'
-        f'<a class="nm" href="/lead?phone={esc(r["phone"])}">'
+        f'<a class="nm" href="/lead?phone={esc(r["phone"])}'
+        f'{back_q}">'
         f'{esc(r["name"])}</a><div class="an">'
         f'{esc(r["angle"] or "")}{kittag}</div></div></div></td>'
         f'<td>{fmt_phone(r["phone"])}</td>'
         f'<td class="small">{esc((r["address"] or "")[:54])}</td>'
         f'<td>{tier_badge(r["tier"])} <b>{esc(r["score"] or "-")}</b></td>'
-        f'<td><form method="post" action="/update" style="margin:0">'
+        f'<td><form method="post" action="/update" style="margin:0" '
+        f'data-inline="1">'
         f'<input type="hidden" name="phone" value="{esc(r["phone"])}">'
         f'<input type="hidden" name="followup" '
         f'value="{esc(r["followup"])}">'
         f'<input type="hidden" name="next" value="{esc(next_url)}">'
-        f'<select name="status" onchange="this.form.submit()" '
+        f'<select name="status" onchange="this.form.requestSubmit()" '
         f'style="padding:5.5px 7px;font-size:13.5px">'
         f'{status_options(r["status"])}</select></form></td>'
         f'<td>{fu}</td>'
@@ -1711,11 +1720,14 @@ def leads_html(conn, params):
     sort = params.get("sort", "score")
     added = params.get("added", "")
     rows = fetch_leads(conn, q, tier, status, sort, added)
+    # The default sort is left out so a plain, unfiltered list stays
+    # a plain "/leads" URL - and the back-link logic can tell an
+    # untouched list from a filtered one just by looking at it.
     query = urllib.parse.urlencode(
         {k: v for k, v in
          (("q", q), ("tier", tier), ("status", status), ("sort", sort),
           ("added", added))
-         if v})
+         if v and not (k == "sort" and v == "score")})
     next_url = "/leads" + (f"?{query}" if query else "")
     tier_opts = "".join(
         f'<option value="{t}"{" selected" if tier == t else ""}>'
@@ -1784,11 +1796,42 @@ placeholder="Name, phone, area, email"></div>
              f"<th>Follow-up</th><th>Last remark</th><th>Seen</th>"
              f"<th>Date Assigned</th></tr>"
              f"{trs}</table>")
+    # Inline status changes: save in place, no page reload, no jump
+    # back to the top. The form still works normally without JS
+    # (plain submit + redirect), this only upgrades it when JS runs.
+    body += """<script>
+document.querySelectorAll('form[data-inline]').forEach(function(f) {
+  var sel = f.querySelector('select[name="status"]');
+  var prev = sel.value;
+  f.addEventListener('submit', function(e) {
+    e.preventDefault();
+    var body = new URLSearchParams();
+    body.set('phone', f.querySelector('input[name="phone"]').value);
+    body.set('status', sel.value);
+    fetch('/api/update', {method: 'POST', body: body})
+      .then(function(r) { return r.json(); })
+      .then(function(j) {
+        if (j.ok) {
+          prev = sel.value;
+          var tr = f.closest('tr');
+          if (tr) {
+            tr.style.background = '#ECFDF5';
+            setTimeout(function() { tr.style.background = ''; }, 900);
+          }
+        } else { sel.value = prev; }
+      })
+      .catch(function() { sel.value = prev; });
+  });
+});
+</script>"""
     return body
 
 
-def kit_panel(conn, lead):
+def kit_panel(conn, lead, back=""):
     phone = lead["phone"]
+    back_q = (f"&back={urllib.parse.quote(back, safe='')}"
+              if back else "")
+    self_url = f"/lead?phone={phone}{back_q}"
     head = '<h2 style="margin-top:0">WhatsApp kit</h2>'
     reason = kit_skip_reason(lead)
     if reason:
@@ -1816,7 +1859,7 @@ def kit_panel(conn, lead):
                      f'style="margin:0"><input type="hidden" '
                      f'name="phone" value="{esc(phone)}">'
                      f'<input type="hidden" name="next" '
-                     f'value="/lead?phone={esc(phone)}">'
+                     f'value="{esc(self_url)}">'
                      f'<button class="btn ghost" type="submit">'
                      f'Generate the report card</button></form>'
                      f'<div class="small">Takes a few seconds - it '
@@ -1881,7 +1924,7 @@ def kit_panel(conn, lead):
 <li><span class="n">2</span><div><b>Attach the {card_noun}</b>{card_html}</div></li>
 {bro_step}<li><span class="n">{mark_n}</span><div><form method="post" action="/kit-sent" style="margin:0">
 <input type="hidden" name="phone" value="{esc(phone)}">
-<input type="hidden" name="next" value="/lead?phone={esc(phone)}">
+<input type="hidden" name="next" value="{esc(self_url)}">
 <button class="btn" type="submit">Mark kit as sent</button>
 <span class="small">Logs it on this lead and sets a call follow-up for tomorrow.</span>
 </form></div></li>
@@ -2008,10 +2051,16 @@ function markSent(btn, phone) {
     return body
 
 
-def lead_html(conn, lead):
+def lead_html(conn, lead, back=""):
     phone = lead["phone"]
     remarks = fetch_remarks(conn, phone)
-    kitp = kit_panel(conn, lead)
+    kitp = kit_panel(conn, lead, back)
+    # The page this lead was opened from (a filtered list, if any).
+    # Every form on this page carries it in `next`, so saving a
+    # status, a remark or a kit action never drops the filter.
+    back_q = (f"&back={urllib.parse.quote(back, safe='')}"
+              if back else "")
+    self_url = f"/lead?phone={phone}{back_q}"
     wa = f"https://wa.me/91{phone}" if len(str(phone)) == 10 else "#"
     timeline = ""
     n_notes = 0
@@ -2043,7 +2092,8 @@ def lead_html(conn, lead):
         supp = (f'<div class="v" style="color:#B42318">Kept out of '
                 f'Vaani results ({esc(lead["suppress_reason"] or "")})'
                 f'</div>')
-    body = f"""<div class="crumbs"><a href="/leads">All Leads</a> /
+    crumb_back = esc(back) if back else "/leads"
+    body = f"""<div class="crumbs"><a href="{crumb_back}">All Leads</a> /
 {esc(lead['name'])}</div>
 <h1>{esc(lead['name'])}</h1>
 <div class="sub">{status_pill(lead['status'])} &nbsp;{followup_chip(lead)}</div>
@@ -2068,6 +2118,7 @@ def lead_html(conn, lead):
 <div>
   <form method="post" action="/remark" style="margin-bottom:13px">
     <input type="hidden" name="phone" value="{esc(phone)}">
+    <input type="hidden" name="next" value="{esc(self_url)}">
     <textarea name="text" rows="3" style="width:100%"
     placeholder="Add a remark - what happened on the call? Who did you speak to?"></textarea>
     <div style="margin-top:7px"><button class="btn" type="submit">Add remark</button></div>
@@ -2082,7 +2133,7 @@ def lead_html(conn, lead):
   </div>
   <form method="post" action="/update">
     <input type="hidden" name="phone" value="{esc(phone)}">
-    <input type="hidden" name="next" value="/lead?phone={esc(phone)}">
+    <input type="hidden" name="next" value="{esc(self_url)}">
     <div class="k">Status</div>
     <select name="status" style="width:100%;margin:4px 0 12px">{status_options(lead['status'])}</select>
     <div class="k">Follow-up date</div>
@@ -2382,8 +2433,14 @@ class Handler(BaseHTTPRequestHandler):
                         "<a href='/leads'>Back to all leads</a></div>",
                         conn))
                 else:
+                    # Only a filtered-list URL is accepted as the
+                    # way back - anything else falls back to /leads.
+                    back = params.get("back", "")
+                    if not back.startswith("/leads"):
+                        back = ""
                     self._send(200, page(lead["name"] or "Lead", "leads",
-                                         lead_html(conn, lead), conn))
+                                         lead_html(conn, lead, back),
+                                         conn))
             elif parsed.path == "/kit":
                 self._send(200, page("Send Kit", "kit",
                                      kit_html(conn), conn))
