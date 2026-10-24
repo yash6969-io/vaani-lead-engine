@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Vaani Lead Engine v3.8
+Vaani Lead Engine v3.10
 ======================
 Type a location (even a small area like "Gota, Ahmedabad") and get 4 lead
 databases about restaurants there:
@@ -35,7 +35,7 @@ import sqlite3
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
-VERSION = "3.9.0"
+VERSION = "3.10.0"
 UPDATE_URL = ("https://raw.githubusercontent.com/yash6969-io/"
               "vaani-lead-engine/main/vaani.py")
 
@@ -454,6 +454,17 @@ def panel_text(page):
         return ""
 
 
+def extract_price_level(ptext):
+    """Maps price band from the place header: ₹ = budget, ₹₹₹₹ = premium.
+    Only the top of the side panel is scanned - the header (name,
+    rating, category, price band) sits there, so a ₹ figure from a
+    menu or review further down cannot be mistaken for the band.
+    Returns the count of ₹ symbols, or None when Maps shows none."""
+    head = ptext[:800]
+    m = re.search(r"₹{1,4}", head)
+    return len(m.group(0)) if m else None
+
+
 def extract_place(page, url):
     """Read one restaurant's Maps page: name, address, phone, website."""
     goto_retry(page, url)
@@ -488,6 +499,7 @@ def extract_place(page, url):
     low = ptext.lower()
     services = {k: (k in ptext)
                 for k in ("Dine-in", "Takeaway", "Delivery")}
+    price_level = extract_price_level(ptext)
     return {
         "name": text_of(page.locator("h1")),
         "address": clean_field(
@@ -502,6 +514,7 @@ def extract_place(page, url):
         "closed": ("permanently closed" in low
                    or "temporarily closed" in low),
         "services": services,
+        "price_level": price_level,
     }
 
 
@@ -682,6 +695,82 @@ def score_lead(r):
     else:
         angle = "Operations upgrade"
     return total, tier, reasons, angle
+
+
+# ---------------------------------------------------------------- delivery segment
+# "Delivery-first mid-tier" (--segment delivery, restaurants only).
+# The slice asked for 2026-10-24: places that live on delivery (and pay
+# aggregator commission for it), have a real dining room too, are NOT
+# famous or scaled, and are priced for everyday repeat orders
+# (₹100-400 mains). Every rule is a public, checkable signal:
+# "loyal base" is proxied by review count + rating, "commission pain"
+# by aggregator presence / no direct ordering, and the price band by
+# Maps' ₹ level (₹/₹₹ ~= budget-to-moderate; exact dish prices are
+# not on Maps, so an unknown band is flagged, never guessed).
+# The segment is an EXTRA file - it never removes anything from the
+# normal outputs, the tracker or the master database.
+
+SEGMENT_SMALL_CATS = ("cart", "stall", "kiosk", "hawker", "vendor")
+SEGMENT_MIN_REVIEWS = 30
+SEGMENT_MAX_REVIEWS = 1500
+SEGMENT_MIN_RATING = 3.8
+SEGMENT_FAMOUS_RATING = 4.7
+SEGMENT_FAMOUS_REVIEWS = 500
+SEGMENT_MAX_PRICE = 2  # ₹ or ₹₹ only; ₹₹₹/₹₹₹₹ = premium, excluded
+
+
+def segment_check(lead):
+    """Delivery-first mid-tier test. Returns (ok, reasons, bucket):
+    reasons explain the verdict in plain words; bucket is the short
+    exclusion label used for the summary counts."""
+    svcs = lead.get("services") or {}
+    name_low = (lead.get("name") or "").lower()
+    cat_low = (lead.get("category") or "").lower()
+    rev = lead.get("reviews") or 0
+    rating = lead.get("rating")
+    aggs = lead.get("web_aggs") or []
+    ordering = lead.get("web_ordering")
+    if not svcs.get("Delivery"):
+        return False, ["No delivery service listed"], "no delivery"
+    if not svcs.get("Dine-in"):
+        return False, ["No dine-in - no dining room to keep"], "no dine-in"
+    if any(c in name_low for c in KNOWN_CHAINS):
+        return False, ["Chain / scaled brand"], "chain"
+    if any(c in cat_low for c in SEGMENT_SMALL_CATS):
+        return False, ["Cart / stall / kiosk - too small, no dining "
+                       "or delivery setup"], "cart/small"
+    if rev < SEGMENT_MIN_REVIEWS:
+        return False, [f"Only {rev} reviews - no evidence of a loyal "
+                       "base yet"], "too few reviews"
+    if rating is not None and rating < SEGMENT_MIN_RATING:
+        return False, [f"Rated {rating} - regulars are not coming "
+                       "back"], "low rating"
+    if rev > SEGMENT_MAX_REVIEWS:
+        return False, [f"{rev} reviews - already too popular / "
+                       "scaled"], "too popular"
+    if (rating is not None and rating >= SEGMENT_FAMOUS_RATING
+            and rev >= SEGMENT_FAMOUS_REVIEWS):
+        return False, [f"Rated {rating} with {rev} reviews - famous, "
+                       "dining-led brand"], "famous"
+    if not aggs and ordering:
+        return False, ["Has direct ordering and no aggregator link - "
+                       "commission pain not visible"], "no commission pain"
+    pl = lead.get("price_level")
+    if pl is not None and pl > SEGMENT_MAX_PRICE:
+        return False, ["₹" * pl + " on Maps - priced above the everyday "
+                       "band"], "premium price"
+    reasons = ["Delivery + dine-in", f"{rev} reviews"]
+    if rating is not None:
+        reasons.append(f"Rated {rating}")
+    if aggs:
+        reasons.append("On " + "/".join(aggs))
+    elif not ordering:
+        reasons.append("No direct ordering found")
+    if pl:
+        reasons.append("₹" * pl + " on Maps")
+    else:
+        reasons.append("Price unknown - check menu")
+    return True, reasons, ""
 
 
 # ---------------------------------------------------------------- master DB
@@ -1369,9 +1458,18 @@ def main():
                          "leads go into their OWN database "
                          "(vaani_healthcare.db), never mixed with "
                          "restaurant data")
+    ap.add_argument("--segment", choices=["delivery"], default=None,
+                    help="delivery: also write delivery_leads.xlsx - "
+                         "only delivery-first mid-tier places "
+                         "(delivery + dine-in, not famous, not "
+                         "carts, everyday prices)")
     a = ap.parse_args()
     self_update()
     apply_vertical(a.vertical)
+    if a.segment and a.vertical != "food":
+        print("  (Note: --segment only applies to restaurants, so it "
+              "is ignored for this healthcare run.)")
+        a.segment = None
 
     print(f"\n  VAANI LEAD ENGINE v{VERSION}")
     print("  ----------------------")
@@ -1437,13 +1535,19 @@ def main():
                 seen_emails.add(e)
                 emails.append(e)
         sc, tier, reasons, angle = score_lead(r)
+        web = r.get("web") or {}
         leads.append({"name": r["name"], "location": r["address"],
                       "phone": ", ".join(mob), "email": ", ".join(em),
                       "website": r.get("website") or "",
                       "rating": r.get("rating"),
                       "reviews": r.get("reviews"),
                       "score": sc, "tier": tier, "angle": angle,
-                      "why": "; ".join(reasons[:4])})
+                      "why": "; ".join(reasons[:4]),
+                      "services": r.get("services") or {},
+                      "category": r.get("category") or "",
+                      "price_level": r.get("price_level"),
+                      "web_aggs": web.get("aggregators") or [],
+                      "web_ordering": bool(web.get("ordering"))})
 
     # the tracker is the user's latest word: sync its outcomes into
     # the master database first (marking someone Interested again
@@ -1498,6 +1602,29 @@ def main():
         except Exception as e:
             print(f"  (!) Excel file failed: {e}")
 
+    # ---- delivery-first mid-tier segment (extra file, nothing removed)
+    seg_n = seg_price_known = 0
+    seg_out = {}
+    if a.segment == "delivery":
+        seg_leads = []
+        for lead in leads:
+            ok, reasons, bucket = segment_check(lead)
+            if ok:
+                s = dict(lead)
+                s["why"] = "; ".join(reasons)
+                seg_leads.append(s)
+            else:
+                seg_out[bucket] = seg_out.get(bucket, 0) + 1
+        seg_n = len(seg_leads)
+        seg_price_known = sum(1 for l in seg_leads
+                              if l.get("price_level"))
+        if ensure_openpyxl():
+            try:
+                write_excel(os.path.join(outdir, "delivery_leads.xlsx"),
+                            seg_leads)
+            except Exception as e:
+                print(f"  (!) Delivery segment file failed: {e}")
+
     for lead in leads:
         master_upsert(lead)
     tracker_result = update_tracker(leads)
@@ -1516,6 +1643,12 @@ def main():
     if winback_n:
         print(f"  Win-back list                : {winback_n} Not "
               f"interested lead(s) safe in {WINBACK_NAME}")
+    if a.segment == "delivery":
+        print(f"  Delivery segment             : {seg_n} lead(s) in "
+              f"delivery_leads.xlsx ({seg_price_known} price-known, "
+              f"{seg_n - seg_price_known} price-unknown - check menu)")
+        for b, n in sorted(seg_out.items(), key=lambda x: -x[1]):
+            print(f"    - left out ({b}): {n}")
     print(f"  Email IDs                    : {len(emails)}")
     tiers = {"A": 0, "B": 0, "C": 0}
     for l in leads:
