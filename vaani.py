@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Vaani Lead Engine v3.10
+Vaani Lead Engine v3.12
 ======================
 Type a location (even a small area like "Gota, Ahmedabad") and get 4 lead
 databases about restaurants there:
@@ -35,7 +35,7 @@ import sqlite3
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
-VERSION = "3.11.0"
+VERSION = "3.12.0"
 UPDATE_URL = ("https://raw.githubusercontent.com/yash6969-io/"
               "vaani-lead-engine/main/vaani.py")
 
@@ -1451,6 +1451,13 @@ def _write_tracker_row(ws, r, d):
 # ---------------------------------------------------------------- main
 
 def main():
+    # Update FIRST, parse arguments second. Otherwise a brand-new flag
+    # (like --segment) is rejected by the OLD copy before the updater
+    # ever gets a chance to fetch the version that knows it - the user
+    # sees "unrecognized arguments" for a flag that already exists
+    # upstream. self_update() needs no parsed arguments: it checks
+    # sys.argv directly for --no-update and restarts with argv intact.
+    self_update()
     ap = argparse.ArgumentParser(
         description=f"Vaani Lead Engine v{VERSION} - location in, 4 lead databases "
                     "out. Scraper built in.")
@@ -1474,10 +1481,9 @@ def main():
     ap.add_argument("--segment", choices=["delivery"], default=None,
                     help="delivery: also write delivery_leads.xlsx - "
                          "only delivery-first mid-tier places "
-                         "(delivery + dine-in, not famous, not "
-                         "carts, everyday prices)")
+                         "(delivery + dine-in or cloud kitchen, not "
+                         "famous, not carts, everyday prices)")
     a = ap.parse_args()
-    self_update()
     apply_vertical(a.vertical)
     if a.segment and a.vertical != "food":
         print("  (Note: --segment only applies to restaurants, so it "
