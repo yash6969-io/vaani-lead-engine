@@ -152,8 +152,11 @@ a focused call list on top of them.
 
 A lead qualifies only if it meets **all** of these:
 
-- **Delivery listed AND dine-in listed** on Maps — it lives on
-  delivery and has a real dining room too.
+- **Delivery listed, plus dine-in OR cloud kitchen** on Maps — it
+  lives on delivery and either has a real dining room or is a cloud
+  kitchen (delivery-only, detected from its Maps category or name).
+  Cloud kitchens are in on purpose: they pay aggregator commission
+  on every order and survive on repeat orders from a loyal audience.
 - **Not a chain** and **not a cart / stall / kiosk** — no scaled
   brands, no tiny vendors with no dining or delivery setup.
 - **Not too popular:** 30–1500 reviews, and never a near-perfect
@@ -181,6 +184,13 @@ see whether the thresholds fit your area. For the repeat-orders-from-
 offices effect, run it in office-dense areas — business districts,
 IT parks, commercial streets — where the same people order lunch
 every day.
+
+Every row in `delivery_leads.xlsx` (and in `all_leads.xlsx`) now
+carries a **Date Assigned** column with the run's date, so you can
+tell at a glance whether you are looking at freshly generated leads
+or ones added in an earlier run — even after files are copied or
+merged. The call tracker already groups leads by run-date sheet;
+this makes the date travel with each row in the Excel files too.
 
 Honest limits: Maps' ₹ level is a rough band, not dish prices, so
 ₹100–400 is approximated, not proven per dish. "Loyal base" and
