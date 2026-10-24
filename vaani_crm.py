@@ -34,7 +34,7 @@ DB_PATH = os.path.join(HERE, "vaani_master.db")
 TRACKER_PATH = os.path.join(HERE, "vaani-call-tracker.xlsx")
 BACKUP_PATH = os.path.join(HERE, "vaani_master.db.crm-backup")
 
-VERSION = "1.5.1"
+VERSION = "1.5.2"
 UPDATE_URL = ("https://raw.githubusercontent.com/yash6969-io/"
               "vaani-lead-engine/main/vaani_crm.py")
 PORTS = (8765, 8766, 8767, 8768, 8769)
@@ -399,7 +399,10 @@ LEAD_SELECT = """
 """
 
 
-def fetch_leads(conn, q="", tier="", status="", sort="score"):
+def fetch_leads(conn, q="", tier="", status="", sort="score", added=""):
+    """added filters by Date Assigned (l.first_seen, the day Vaani
+    first put the lead in the database): 'today', '7d' (last 7 days),
+    '30d' (last 30 days), or one exact YYYY-MM-DD run date."""
     sql = LEAD_SELECT + " WHERE 1=1"
     args = []
     if q:
@@ -413,7 +416,22 @@ def fetch_leads(conn, q="", tier="", status="", sort="score"):
     if status in STATUSES:
         sql += " AND COALESCE(s.status, 'Not called') = ?"
         args.append(status)
-    if sort == "followup":
+    if added == "today":
+        sql += " AND l.first_seen = ?"
+        args.append(date.today().isoformat())
+    elif added == "7d":
+        sql += " AND l.first_seen >= ?"
+        args.append((date.today() - timedelta(days=6)).isoformat())
+    elif added == "30d":
+        sql += " AND l.first_seen >= ?"
+        args.append((date.today() - timedelta(days=29)).isoformat())
+    elif re.fullmatch(r"\d{4}-\d{2}-\d{2}", added or ""):
+        sql += " AND l.first_seen = ?"
+        args.append(added)
+    if sort == "added":
+        sql += (" ORDER BY l.first_seen DESC, (l.score IS NULL),"
+                " l.score DESC")
+    elif sort == "followup":
         sql += (" ORDER BY (COALESCE(s.followup, '') = ''),"
                 " s.followup, (l.score IS NULL), l.score DESC")
     elif sort == "recent":
@@ -1524,6 +1542,10 @@ def dashboard_html(conn):
         f'<div class="l">A-tier leads in the bank</div></div>'
         f'<div class="hstat"><div class="n">{demos}</div>'
         f'<div class="l">demos in motion</div></div></div>')
+    new_today = vals[-1] if vals else 0
+    new_btn = (f'<a class="btn ghost" href="/leads?added=today">'
+               f'New leads today ({new_today})</a>'
+               if new_today else "")
     hero = (
         f'<div class="hero"><h1>{greeting()}, {esc(USER_NAME)}</h1>'
         f'<div class="hsub">{date_line} - here is where your leads '
@@ -1531,6 +1553,7 @@ def dashboard_html(conn):
         f'<div class="hcta"><a class="btn" href="/call">'
         f'{icon("phone", 16)} Start calling</a>'
         f'<a class="btn ghost" href="/board">View pipeline</a>'
+        f'{new_btn}'
         f'</div></div>')
 
     def kpi2(lbl, ic, num, foot, ic_cls="", num_cls=""):
@@ -1677,7 +1700,8 @@ def lead_row(r, next_url, kit_ts=None):
         f'{status_options(r["status"])}</select></form></td>'
         f'<td>{fu}</td>'
         f'<td class="small">{remark}</td>'
-        f'<td class="small">{esc(r["times_seen"] or 1)}x</td></tr>')
+        f'<td class="small">{esc(r["times_seen"] or 1)}x</td>'
+        f'<td class="small">{fmt_date(r["first_seen"])}</td></tr>')
 
 
 def leads_html(conn, params):
@@ -1685,10 +1709,12 @@ def leads_html(conn, params):
     tier = params.get("tier", "")
     status = params.get("status", "")
     sort = params.get("sort", "score")
-    rows = fetch_leads(conn, q, tier, status, sort)
+    added = params.get("added", "")
+    rows = fetch_leads(conn, q, tier, status, sort, added)
     query = urllib.parse.urlencode(
         {k: v for k, v in
-         (("q", q), ("tier", tier), ("status", status), ("sort", sort))
+         (("q", q), ("tier", tier), ("status", status), ("sort", sort),
+          ("added", added))
          if v})
     next_url = "/leads" + (f"?{query}" if query else "")
     tier_opts = "".join(
@@ -1703,16 +1729,46 @@ def leads_html(conn, params):
         for v, lbl in (("score", "Best score first"),
                        ("followup", "Follow-up date"),
                        ("recent", "Recently seen"),
+                       ("added", "Date assigned (newest first)"),
                        ("name", "Name")))
+    # Date Assigned filter: quick ranges plus every real run date in
+    # the database, newest first - so "just the new leads" is one tap
+    # after a fresh Vaani run.
+    added_dates = [r["d"] for r in conn.execute(
+        "SELECT DISTINCT substr(first_seen, 1, 10) d FROM leads"
+        " WHERE first_seen IS NOT NULL AND first_seen != ''"
+        " ORDER BY d DESC LIMIT 90")]
+    added_opts = '<option value="">All dates</option>'
+    for v, lbl in (("today", "Added today"),
+                   ("7d", "Added in the last 7 days"),
+                   ("30d", "Added in the last 30 days")):
+        added_opts += (f'<option value="{v}"'
+                       f'{" selected" if added == v else ""}>'
+                       f'{lbl}</option>')
+    for d in added_dates:
+        added_opts += (f'<option value="{esc(d)}"'
+                       f'{" selected" if added == d else ""}>'
+                       f'Added on {esc(fmt_date(d))}</option>')
+    if added == "today":
+        added_note = " - added today"
+    elif added == "7d":
+        added_note = " - added in the last 7 days"
+    elif added == "30d":
+        added_note = " - added in the last 30 days"
+    elif added:
+        added_note = f" - added on {fmt_date(added)}"
+    else:
+        added_note = ""
     body = f"""<h1>All leads</h1>
-<div class="sub">{len(rows)} lead(s) shown - the pipeline board and
-this list always agree.</div>
+<div class="sub">{len(rows)} lead(s) shown{added_note} - the pipeline
+board and this list always agree.</div>
 <form class="filters" method="get" action="/leads">
 <div><label>Search</label>
 <input name="q" value="{esc(q)}" size="28"
 placeholder="Name, phone, area, email"></div>
 <div><label>Tier</label><select name="tier">{tier_opts}</select></div>
 <div><label>Status</label><select name="status">{status_opts}</select></div>
+<div><label>Date assigned</label><select name="added">{added_opts}</select></div>
 <div><label>Sort</label><select name="sort">{sort_opts}</select></div>
 <div><button class="btn" type="submit">Filter</button>
 <a class="btn ghost" href="/leads">Clear</a></div></form>"""
@@ -1725,7 +1781,8 @@ placeholder="Name, phone, area, email"></div>
                   for r in rows)
     body += (f"<table><tr><th>{'Clinic' if HEALTHCARE else 'Restaurant'}</th><th>Phone</th>"
              f"<th>Location</th><th>Score</th><th>Status</th>"
-             f"<th>Follow-up</th><th>Last remark</th><th>Seen</th></tr>"
+             f"<th>Follow-up</th><th>Last remark</th><th>Seen</th>"
+             f"<th>Date Assigned</th></tr>"
              f"{trs}</table>")
     return body
 
