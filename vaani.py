@@ -35,7 +35,7 @@ import sqlite3
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
-VERSION = "3.10.0"
+VERSION = "3.11.0"
 UPDATE_URL = ("https://raw.githubusercontent.com/yash6969-io/"
               "vaani-lead-engine/main/vaani.py")
 
@@ -700,9 +700,11 @@ def score_lead(r):
 # ---------------------------------------------------------------- delivery segment
 # "Delivery-first mid-tier" (--segment delivery, restaurants only).
 # The slice asked for 2026-10-24: places that live on delivery (and pay
-# aggregator commission for it), have a real dining room too, are NOT
-# famous or scaled, and are priced for everyday repeat orders
-# (₹100-400 mains). Every rule is a public, checkable signal:
+# aggregator commission for it), have a real dining room - or are a
+# cloud kitchen, which is delivery-only yet the most commission-exposed
+# of all - are NOT famous or scaled, and are priced for everyday
+# repeat orders (₹100-400 mains). Every rule is a public, checkable
+# signal:
 # "loyal base" is proxied by review count + rating, "commission pain"
 # by aggregator presence / no direct ordering, and the price band by
 # Maps' ₹ level (₹/₹₹ ~= budget-to-moderate; exact dish prices are
@@ -732,8 +734,16 @@ def segment_check(lead):
     ordering = lead.get("web_ordering")
     if not svcs.get("Delivery"):
         return False, ["No delivery service listed"], "no delivery"
-    if not svcs.get("Dine-in"):
-        return False, ["No dine-in - no dining room to keep"], "no dine-in"
+    # Dining leg: a real dining room OR a cloud kitchen. Cloud kitchens
+    # are delivery-only by design, yet they are the ones most exposed
+    # to aggregator commission - and they survive on repeat orders
+    # from a loyal audience, which is exactly this segment's target.
+    # Detected from the Maps category or the business name.
+    is_cloud = ("cloud kitchen" in name_low or "cloud kitchen" in cat_low
+                or "ghost kitchen" in name_low
+                or "ghost kitchen" in cat_low)
+    if not svcs.get("Dine-in") and not is_cloud:
+        return False, ["No dine-in and not a cloud kitchen"], "no dine-in"
     if any(c in name_low for c in KNOWN_CHAINS):
         return False, ["Chain / scaled brand"], "chain"
     if any(c in cat_low for c in SEGMENT_SMALL_CATS):
@@ -759,7 +769,9 @@ def segment_check(lead):
     if pl is not None and pl > SEGMENT_MAX_PRICE:
         return False, ["₹" * pl + " on Maps - priced above the everyday "
                        "band"], "premium price"
-    reasons = ["Delivery + dine-in", f"{rev} reviews"]
+    reasons = [("Cloud kitchen (delivery-only)" if is_cloud
+                else "Delivery + dine-in"),
+               f"{rev} reviews"]
     if rating is not None:
         reasons.append(f"Rated {rating}")
     if aggs:
@@ -1249,7 +1261,7 @@ def write_excel(path, leads):
     for c, h in enumerate(["Restaurant Name", "Location",
                            "Phone Number", "Email ID", "Score", "Tier",
                            "Pitch Angle", "Rating", "Reviews",
-                           "Why this lead"], 1):
+                           "Why this lead", "Date Assigned"], 1):
         cell = ws.cell(row=1, column=c, value=h)
         cell.fill = head_fill
         cell.font = head_font
@@ -1266,7 +1278,8 @@ def write_excel(path, leads):
         ws.cell(row=r, column=8, value=lead.get("rating"))
         ws.cell(row=r, column=9, value=lead.get("reviews"))
         ws.cell(row=r, column=10, value=lead.get("why"))
-    widths = [38, 55, 16, 34, 7, 6, 24, 8, 9, 60]
+        ws.cell(row=r, column=11, value=lead.get("assigned"))
+    widths = [38, 55, 16, 34, 7, 6, 24, 8, 9, 60, 14]
     for i, w_ in enumerate(widths, 1):
         ws.column_dimensions[chr(64 + i)].width = w_
     ws.freeze_panes = "A2"
@@ -1543,6 +1556,10 @@ def main():
                       "reviews": r.get("reviews"),
                       "score": sc, "tier": tier, "angle": angle,
                       "why": "; ".join(reasons[:4]),
+                      # Date Assigned: the run date, so a lead row
+                      # always shows when it was added - new runs
+                      # are instantly tellable from older leads.
+                      "assigned": date.today().strftime("%d %b %Y"),
                       "services": r.get("services") or {},
                       "category": r.get("category") or "",
                       "price_level": r.get("price_level"),
