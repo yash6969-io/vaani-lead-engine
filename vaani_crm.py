@@ -34,7 +34,7 @@ DB_PATH = os.path.join(HERE, "vaani_master.db")
 TRACKER_PATH = os.path.join(HERE, "vaani-call-tracker.xlsx")
 BACKUP_PATH = os.path.join(HERE, "vaani_master.db.crm-backup")
 
-VERSION = "1.5.0"
+VERSION = "1.5.1"
 UPDATE_URL = ("https://raw.githubusercontent.com/yash6969-io/"
               "vaani-lead-engine/main/vaani_crm.py")
 PORTS = (8765, 8766, 8767, 8768, 8769)
@@ -733,8 +733,8 @@ def clinic_observation(lead):
 def clinic_kit_message(lead):
     name = lead["name"] or "your clinic"
     lines = [
-        f"Namaste {name} team, this is {USER_NAME} Tanna from "
-        "Content365.",
+        f"Namaste {name} team \u2014 as discussed on our call, "
+        f"this is {USER_NAME} Tanna from Content365.",
         "",
         "This is for the doctor - I would be grateful if you "
         "could pass it on.",
@@ -743,8 +743,8 @@ def clinic_kit_message(lead):
         "ready-to-post content for clinics - 365 branded posts "
         "with your clinic's name, logo and phone on every post, "
         "captions for Instagram, Facebook and more in English "
-        "and Hindi, and health days and festivals posted on the "
-        "right day. You simply approve and post.",
+        "and Hindi, and health days and festivals planned for "
+        "the right day. You simply approve and post.",
         "",
         clinic_observation(lead),
         "",
@@ -754,10 +754,11 @@ def clinic_kit_message(lead):
         f"clinics like yours, here: {C365_SAMPLES} - please do "
         f"check them out.",
         "",
-        "If you like them, I will make your first 7 days of "
-        "posts with your clinic's own name and logo - free. "
-        "The full year is \u20B93,999 including GST, only if "
-        "you want it.",
+        "If you like them, I will make a free sample with your "
+        "clinic's own name and logo, so you can judge it "
+        "yourself. There is also a free plan - 2 ready posts "
+        "every 48 hours, no payment needed. The full year is "
+        "\u20B93,999 including GST, only if you want it.",
         "",
         f"More about us: {C365_WEBSITE}",
         "",
