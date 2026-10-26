@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#0d202b" />
+    <meta
+      name="description"
+      content="Vaani CRM keeps scraped lead data, follow-ups and sales progress in one focused workspace."
+    />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; img-src 'self' data:; style-src 'self'; font-src 'self'; script-src 'self'; connect-src 'self';"
+    />
+    <link rel="stylesheet" href="/src/styles.css" />
+    <title>Vaani CRM — lead workspace</title>
+  </head>
+  <body>
+    <a class="skip-link" href="#main-content">Skip to content</a>
+    <div id="app" class="app-shell">
+      <div class="app-loading" role="status">Loading your workspace…</div>
+    </div>
+    <div id="toast-root" aria-live="polite" aria-atomic="true"></div>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>

@@ -1,0 +1,20 @@
+# Local CRM data and generated output
+*.db
+*.db-*
+*.xlsx
+vaani-not-interested.xlsx
+report-cards/
+clinic-reports/
+wa-profile/
+wa-debug.*
+kit_caption.txt
+*.bak
+*.pre-update
+.*.update
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Local runtime logs
+*.log

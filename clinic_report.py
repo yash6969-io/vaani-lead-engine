@@ -36,7 +36,7 @@ import urllib.request
 from datetime import date
 
 # ------------------------------------------------------------------ config
-VERSION = "1.0.1"
+VERSION = "1.0.0"
 UPDATE_URL = ("https://raw.githubusercontent.com/yash6969-io/"
               "vaani-lead-engine/main/clinic_report.py")
 SELLER_NAME = "Yash Tanna"
@@ -518,10 +518,10 @@ Google listing</div></div>
 {wins_html}
 {gaps_html}
 {panel}
-<div class="foot"><div class="cta"><b>Want a free sample?</b><span>I
-will make posts with your clinic's name and logo - free, so you
-judge them yourself. There is also a free plan: 2 posts every 48
-hours, no payment needed. Reply on this WhatsApp.</span></div>
+<div class="foot"><div class="cta"><b>Want to see your first week
+of posts?</b><span>I will make 7 days of posts with your clinic's
+name and logo - free. Reply on this WhatsApp and judge them
+yourself.</span></div>
 <div class="brand"><div class="bname">{esc(BRAND)}</div>
 <div class="who2">{esc(SELLER_NAME)}{phone_line}{site_line}</div></div></div>
 <div class="fine">This report uses only your public Google listing data
