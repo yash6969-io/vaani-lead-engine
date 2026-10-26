@@ -30,7 +30,7 @@ import vaani_crm_legacy as legacy
 
 HERE = Path(__file__).resolve().parent
 UI_ROOT = HERE / "vaani_ui"
-VERSION = "2.0.0"
+VERSION = "2.1.0"
 UPDATE_MANIFEST_URL = (
     "https://raw.githubusercontent.com/yash6969-io/"
     "vaani-lead-engine/main/update-manifest.json"

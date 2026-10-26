@@ -1,7 +1,7 @@
 {
-  "version": "2.0.0",
+  "version": "2.1.0",
   "files": [
-    { "path": "vaani_crm.py", "sha256": "5e856ad94c5a05109d4e9e6c15a83ca3dc33dc729b856520c600101d1e3d8ded" },
+    { "path": "vaani_crm.py", "sha256": "3efa726c0da89ddb2e7511f8bf7ce772fc98dfbbf4a9fbe8b06c0a8274ac672e" },
     { "path": "vaani_crm_legacy.py", "sha256": "1232bf1c928fcd11d2136edfd77633cd92075a580092e996cad49d1bbc909838" },
     { "path": "vaani.py", "sha256": "3deedcea03cabab2fe45304fe2ea544b980846d90224445664b0edcd4e4ea596" },
     { "path": "report_card.py", "sha256": "695dd5b088353086b1317d818c766061952a9b8a154f5aced5a98cbcb29553f5" },
