@@ -37,6 +37,11 @@ scraper share one source of truth.
 - **All leads** — a faster searchable workspace with score, tier, source,
   status and follow-up filters. Click a lead to open the drawer, add notes,
   change its status or schedule the next action without leaving the list.
+- **Report & WhatsApp kit** — inside every eligible Restaurant or Healthcare
+  lead, generate the one-page report, preview it, download the brochure,
+  view the prepared message, or send the complete kit automatically through
+  WhatsApp Web. The send order is message, report card, then brochure where
+  applicable, and each send is logged in the local database.
 - **Pipeline** — drag leads between New, Contacted, Interested, Demo, Won
   and Lost. The change is saved into the same SQLite CRM state immediately.
 - **Import runs** — shows the scrape dates already present in the database.
