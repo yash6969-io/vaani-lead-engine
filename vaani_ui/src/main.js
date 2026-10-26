@@ -40,6 +40,7 @@ const ICONS = {
   search: '<circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/>',
   plus: '<path d="M12 5v14M5 12h14"/>',
   upload: '<path d="M12 16V4m0 0L7 9m5-5 5 5M5 20h14"/>',
+  send: '<path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/>',
   download: '<path d="M12 4v12m0 0 5-5m-5 5-5-5M5 20h14"/>',
   arrow: '<path d="M5 12h14M13 6l6 6-6 6"/>',
   chevron: '<path d="m9 18 6-6-6-6"/>',
@@ -128,7 +129,51 @@ function normalizeApiLead(lead) {
     status: lead.status || 'Not called',
     notes: Array.isArray(lead.notes) ? lead.notes : [],
     signals: Array.isArray(lead.signals) ? lead.signals : [],
+    kit: lead.kit || {},
   };
+}
+
+function kitPanel(lead) {
+  const kit = lead.kit || {};
+  if (!apiMode) return '';
+  if (kit.supported === false) {
+    return `<div class="drawer-section kit-panel kit-panel--muted"><div class="drawer-section__heading"><h3>Report & WhatsApp kit</h3><span class="muted">Coming with this workspace</span></div><p>${escapeHtml(kit.message || 'This workspace does not have a report generator configured yet.')}</p></div>`;
+  }
+  if (kit.skipReason) {
+    return `<div class="drawer-section kit-panel kit-panel--muted"><div class="drawer-section__heading"><h3>Report & WhatsApp kit</h3><span class="muted">Not recommended</span></div><p>${escapeHtml(kit.skipReason)}</p></div>`;
+  }
+  return `<div class="drawer-section kit-panel"><div class="drawer-section__heading"><div><h3>Report & WhatsApp kit</h3><span class="muted">${kit.sentAt ? `Last sent ${formatDateTime(kit.sentAt)}` : 'Ready for this lead'}</span></div><span class="kit-status ${kit.sentAt ? 'kit-status--sent' : ''}"><i></i>${kit.sentAt ? 'Sent' : 'Not sent'}</span></div><div class="kit-actions">${kit.cardReady ? `<a class="button button--secondary" href="${escapeHtml(kit.cardUrl)}" target="_blank" rel="noreferrer">${icon('external', 15)} Preview report</a>` : `<button class="button button--secondary" data-generate-report data-lead-id="${escapeHtml(lead.id)}">${icon('sparkle', 15)} Generate report</button>`}<button class="button button--primary" data-autosend-kit data-lead-id="${escapeHtml(lead.id)}">${icon('send', 15)} Send kit automatically</button></div><div class="kit-secondary-actions"><button class="text-button" data-mark-kit-sent data-lead-id="${escapeHtml(lead.id)}">Mark as sent</button>${kit.brochureAvailable ? `<a class="text-button" href="${escapeHtml(kit.brochureUrl)}">Download brochure</a>` : ''}</div><details class="kit-message"><summary>View message</summary><pre>${escapeHtml(kit.message || '')}</pre></details><small class="kit-help">The kit sends the intro message, report card and brochure in order. Keep WhatsApp Web open until it finishes.</small></div>`;
+}
+
+async function kitAction(id, action) {
+  const lead = leadById(id);
+  if (!lead) return;
+  const button = document.querySelector(`[data-${action === 'generate' ? 'generate-report' : action === 'autosend' ? 'autosend-kit' : 'mark-kit-sent'}][data-lead-id="${CSS.escape(id)}"]`);
+  if (button) {
+    button.disabled = true;
+    button.classList.add('is-loading');
+    button.dataset.originalLabel = button.textContent;
+    button.textContent = action === 'generate' ? 'Generating…' : action === 'autosend' ? 'Sending…' : 'Saving…';
+  }
+  try {
+    const response = await fetch(`/api/kit-${action === 'generate' ? 'generate' : action === 'autosend' ? 'autosend' : 'sent'}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ workspace: state.workspace, phone: lead.phone }),
+    });
+    const result = await response.json();
+    if (!response.ok || !result.ok) throw new Error(result.message || 'Kit action failed.');
+    state.leads = state.leads.map((item) => item.id === id ? { ...item, kit: result.kit || item.kit } : item);
+    renderDrawer();
+    showToast(result.message || 'Kit updated');
+  } catch (error) {
+    showToast(error.message || 'Kit action failed.', 'danger');
+    if (button) {
+      button.disabled = false;
+      button.classList.remove('is-loading');
+      button.textContent = button.dataset.originalLabel || 'Try again';
+    }
+  }
 }
 
 async function hydrateFromApi(selectedWorkspace = state.workspace) {
@@ -430,7 +475,7 @@ function renderDrawer() {
   const notes = lead.notes || [];
   drawer.className = 'lead-drawer is-open';
   drawer.setAttribute('aria-hidden', 'false');
-  drawer.innerHTML = `<div class="drawer-scrim" data-close-drawer></div><div class="drawer-panel"><div class="drawer-header"><div><span class="drawer-kicker">Lead workspace</span><span class="drawer-source">${escapeHtml(lead.source || 'Manual entry')}</span></div><button class="icon-button" data-close-drawer aria-label="Close lead drawer">${icon('close', 19)}</button></div><div class="drawer-content"><div class="drawer-lead-heading">${initialsAvatar(lead.name, 'avatar--large')}<div><h2>${escapeHtml(lead.name)}</h2><p>${escapeHtml(lead.location)}</p><div class="drawer-tags">${tierBadge(lead.tier)} ${scoreBadge(lead.score)} ${statusPill(lead.status)}</div></div></div><div class="drawer-actions"><a class="button button--primary" href="tel:${phoneDigits(lead.phone)}">${icon('phone', 16)} Call</a><a class="button button--secondary" href="https://wa.me/91${phoneDigits(lead.phone)}" target="_blank" rel="noreferrer">WhatsApp</a></div><div class="drawer-section drawer-section--details"><div class="drawer-section__heading"><h3>Contact details</h3><span class="muted">Scanned signals</span></div><div class="contact-grid"><div><span>Contact</span><strong>${escapeHtml(lead.contact || 'Unknown')}</strong></div><div><span>Mobile</span><strong>${escapeHtml(lead.phone)}</strong></div><div><span>Email</span><strong>${lead.email ? `<a href="mailto:${escapeHtml(lead.email)}">${escapeHtml(lead.email)}</a>` : '<em>Not found</em>'}</strong></div><div><span>Website</span><strong>${lead.website ? `<a href="${escapeHtml(websiteHref(lead.website))}" target="_blank" rel="noreferrer">${escapeHtml(lead.website)} ${icon('external', 12)}</a>` : '<em>Not found</em>'}</strong></div></div></div><div class="drawer-section drawer-section--next"><div class="drawer-section__heading"><h3>Next step</h3><span class="muted">Update saves instantly</span></div><div class="drawer-form-row"><label>Status<select data-drawer-status data-lead-id="${escapeHtml(lead.id)}">${statusSelectOptions(lead.status, false)}</select></label><label>Follow-up<input type="date" data-drawer-followup data-lead-id="${escapeHtml(lead.id)}" value="${escapeHtml(lead.followup || '')}"></label></div><div class="quick-dates"><button class="text-button" data-set-followup="1" data-lead-id="${escapeHtml(lead.id)}">Tomorrow</button><button class="text-button" data-set-followup="3" data-lead-id="${escapeHtml(lead.id)}">+3 days</button><button class="text-button" data-set-followup="7" data-lead-id="${escapeHtml(lead.id)}">Next week</button><button class="text-button text-button--muted" data-clear-followup data-lead-id="${escapeHtml(lead.id)}">Clear date</button></div></div><div class="drawer-section"><div class="drawer-section__heading"><h3>Why this lead</h3><span class="muted">Score evidence</span></div><div class="signal-list">${(lead.signals || []).map((signal) => `<span>${icon('check', 13)}${escapeHtml(signal)}</span>`).join('')}</div><p class="angle-callout"><strong>Pitch angle:</strong> ${escapeHtml(lead.angle || 'New opportunity')}</p></div><div class="drawer-section drawer-section--notes"><div class="drawer-section__heading"><h3>Notes & activity</h3><span class="muted">${notes.length} ${notes.length === 1 ? 'entry' : 'entries'}</span></div><form data-note-form data-lead-id="${escapeHtml(lead.id)}"><textarea name="note" rows="3" placeholder="What happened? Add context for the next call…"></textarea><div class="note-form__footer"><span>Private to this workspace</span><button class="button button--secondary" type="submit">Add note ${icon('arrow', 14)}</button></div></form><div class="timeline">${notes.length ? notes.map((note) => `<div class="timeline-item"><span class="timeline-marker ${note.source === 'status' ? 'timeline-marker--status' : ''}">${icon(note.source === 'status' ? 'check' : 'note', 12)}</span><div><strong>${escapeHtml(note.text)}</strong><small>${formatDateTime(note.createdAt)} · ${escapeHtml(note.source === 'status' ? 'Pipeline update' : 'Note')}</small></div></div>`).join('') : '<div class="timeline-empty">No notes yet. Add the context you will want on the next call.</div>'}</div></div></div></div>`;
+  drawer.innerHTML = `<div class="drawer-scrim" data-close-drawer></div><div class="drawer-panel"><div class="drawer-header"><div><span class="drawer-kicker">Lead workspace</span><span class="drawer-source">${escapeHtml(lead.source || 'Manual entry')}</span></div><button class="icon-button" data-close-drawer aria-label="Close lead drawer">${icon('close', 19)}</button></div><div class="drawer-content"><div class="drawer-lead-heading">${initialsAvatar(lead.name, 'avatar--large')}<div><h2>${escapeHtml(lead.name)}</h2><p>${escapeHtml(lead.location)}</p><div class="drawer-tags">${tierBadge(lead.tier)} ${scoreBadge(lead.score)} ${statusPill(lead.status)}</div></div></div><div class="drawer-actions"><a class="button button--primary" href="tel:${phoneDigits(lead.phone)}">${icon('phone', 16)} Call</a><a class="button button--secondary" href="https://wa.me/91${phoneDigits(lead.phone)}" target="_blank" rel="noreferrer">WhatsApp</a></div><div class="drawer-section drawer-section--details"><div class="drawer-section__heading"><h3>Contact details</h3><span class="muted">Scanned signals</span></div><div class="contact-grid"><div><span>Contact</span><strong>${escapeHtml(lead.contact || 'Unknown')}</strong></div><div><span>Mobile</span><strong>${escapeHtml(lead.phone)}</strong></div><div><span>Email</span><strong>${lead.email ? `<a href="mailto:${escapeHtml(lead.email)}">${escapeHtml(lead.email)}</a>` : '<em>Not found</em>'}</strong></div><div><span>Website</span><strong>${lead.website ? `<a href="${escapeHtml(websiteHref(lead.website))}" target="_blank" rel="noreferrer">${escapeHtml(lead.website)} ${icon('external', 12)}</a>` : '<em>Not found</em>'}</strong></div></div></div><div class="drawer-section drawer-section--next"><div class="drawer-section__heading"><h3>Next step</h3><span class="muted">Update saves instantly</span></div><div class="drawer-form-row"><label>Status<select data-drawer-status data-lead-id="${escapeHtml(lead.id)}">${statusSelectOptions(lead.status, false)}</select></label><label>Follow-up<input type="date" data-drawer-followup data-lead-id="${escapeHtml(lead.id)}" value="${escapeHtml(lead.followup || '')}"></label></div><div class="quick-dates"><button class="text-button" data-set-followup="1" data-lead-id="${escapeHtml(lead.id)}">Tomorrow</button><button class="text-button" data-set-followup="3" data-lead-id="${escapeHtml(lead.id)}">+3 days</button><button class="text-button" data-set-followup="7" data-lead-id="${escapeHtml(lead.id)}">Next week</button><button class="text-button text-button--muted" data-clear-followup data-lead-id="${escapeHtml(lead.id)}">Clear date</button></div></div><div class="drawer-section"><div class="drawer-section__heading"><h3>Why this lead</h3><span class="muted">Score evidence</span></div><div class="signal-list">${(lead.signals || []).map((signal) => `<span>${icon('check', 13)}${escapeHtml(signal)}</span>`).join('')}</div><p class="angle-callout"><strong>Pitch angle:</strong> ${escapeHtml(lead.angle || 'New opportunity')}</p></div>${kitPanel(lead)}<div class="drawer-section drawer-section--notes"><div class="drawer-section__heading"><h3>Notes & activity</h3><span class="muted">${notes.length} ${notes.length === 1 ? 'entry' : 'entries'}</span></div><form data-note-form data-lead-id="${escapeHtml(lead.id)}"><textarea name="note" rows="3" placeholder="What happened? Add context for the next call…"></textarea><div class="note-form__footer"><span>Private to this workspace</span><button class="button button--secondary" type="submit">Add note ${icon('arrow', 14)}</button></div></form><div class="timeline">${notes.length ? notes.map((note) => `<div class="timeline-item"><span class="timeline-marker ${note.source === 'status' ? 'timeline-marker--status' : ''}">${icon(note.source === 'status' ? 'check' : 'note', 12)}</span><div><strong>${escapeHtml(note.text)}</strong><small>${formatDateTime(note.createdAt)} · ${escapeHtml(note.source === 'status' ? 'Pipeline update' : 'Note')}</small></div></div>`).join('') : '<div class="timeline-empty">No notes yet. Add the context you will want on the next call.</div>'}</div></div></div></div>`;
 }
 
 function openLead(id) {
@@ -648,6 +693,12 @@ function handleClick(event) {
   }
   if (event.target.closest('[data-start-calling]')) {
     startCalling();
+    return;
+  }
+  const kitButton = event.target.closest('[data-generate-report], [data-autosend-kit], [data-mark-kit-sent]');
+  if (kitButton) {
+    const action = kitButton.hasAttribute('data-generate-report') ? 'generate' : kitButton.hasAttribute('data-autosend-kit') ? 'autosend' : 'mark';
+    kitAction(kitButton.dataset.leadId, action);
     return;
   }
   const shortcut = event.target.closest('[data-filter-shortcut]');

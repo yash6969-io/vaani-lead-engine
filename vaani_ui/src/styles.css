@@ -412,6 +412,21 @@ input[type="checkbox"] { width: 15px; height: 15px; accent-color: var(--teal); }
 .drawer-section--notes form { padding: 11px; border: 1px solid var(--line); border-radius: 11px; background: #fff; }
 .drawer-section--notes textarea { width: 100%; min-height: 76px; resize: vertical; padding: 4px 2px 8px; border: 0; outline: 0; background: transparent; color: var(--ink); font-size: 12px; }
 .drawer-section--notes textarea::placeholder { color: #a2afb5; }
+.kit-panel { background: linear-gradient(145deg, #f5fffc, #eefaf7); border-color: #bfe9df; }
+.kit-panel--muted { background: #f7f8f9; border-color: var(--line); }
+.kit-panel .drawer-section__heading { align-items: flex-start; }
+.kit-status { display: inline-flex; align-items: center; gap: 6px; color: #a15c08; font-size: 11px; font-weight: 750; text-transform: uppercase; letter-spacing: .06em; }
+.kit-status i { width: 7px; height: 7px; border-radius: 50%; background: #f59e0b; }
+.kit-status--sent { color: #13795b; }
+.kit-status--sent i { background: #27b88d; }
+.kit-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 14px; }
+.kit-actions .button { flex: 1 1 145px; justify-content: center; }
+.kit-secondary-actions { display: flex; gap: 16px; flex-wrap: wrap; margin-top: 10px; }
+.kit-message { margin-top: 13px; border-top: 1px solid rgba(32, 143, 121, .18); padding-top: 10px; }
+.kit-message summary { cursor: pointer; color: var(--ink-muted); font-size: 12px; font-weight: 700; }
+.kit-message pre { max-height: 190px; overflow: auto; margin: 9px 0 0; padding: 10px; border-radius: 8px; background: rgba(255,255,255,.75); color: var(--ink-muted); font: 11px/1.5 ui-monospace, SFMono-Regular, Consolas, monospace; white-space: pre-wrap; }
+.kit-help { display: block; margin-top: 12px; color: var(--ink-muted); font-size: 11px; line-height: 1.45; }
+.kit-actions .is-loading { opacity: .7; cursor: wait; }
 .note-form__footer { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding-top: 8px; border-top: 1px solid var(--line); }
 .note-form__footer span { color: var(--ink-faint); font-size: 9.5px; }
 .note-form__footer .button { min-height: 31px; padding-inline: 10px; font-size: 10.5px; }

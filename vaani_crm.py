@@ -30,7 +30,7 @@ import vaani_crm_legacy as legacy
 
 HERE = Path(__file__).resolve().parent
 UI_ROOT = HERE / "vaani_ui"
-VERSION = "2.1.0"
+VERSION = "2.2.0"
 UPDATE_MANIFEST_URL = (
     "https://raw.githubusercontent.com/yash6969-io/"
     "vaani-lead-engine/main/update-manifest.json"
@@ -144,6 +144,101 @@ def workspace_conn(record):
 def workspace_rows(conn):
     return conn.execute(legacy.LEAD_SELECT +
                         " ORDER BY (l.score IS NULL), l.score DESC, l.reviews DESC").fetchall()
+
+
+def _configure_legacy_for_workspace(record):
+    """Point the legacy report/kit helpers at one selected workspace."""
+    key = record["key"]
+    if key not in ("restaurants", "healthcare"):
+        return False
+    healthcare = key == "healthcare"
+    legacy.HEALTHCARE = healthcare
+    legacy.SECTION = "healthcare" if healthcare else "food"
+    legacy.SECTION_LABEL = record["label"]
+    legacy.DB_PATH = str(record["path"])
+    legacy.BACKUP_PATH = str(record["path"]) + ".crm-backup"
+    legacy.TRACKER_PATH = str(HERE / ("vaani-healthcare-tracker.xlsx" if healthcare else "vaani-call-tracker.xlsx"))
+    legacy.REPORT_CARD_SCRIPT = str(HERE / ("clinic_report.py" if healthcare else "report_card.py"))
+    legacy.REPORT_CARDS_DIR = str(HERE / ("clinic-reports" if healthcare else "report-cards"))
+    legacy.BROCHURE_PATH = str(HERE / "book-my-food-brochure.pdf")
+    legacy.KIT_SEND_SCRIPT = str(HERE / "kit_send.py")
+    return True
+
+
+def _find_workspace_lead(conn, phone):
+    phone = _phone_key(phone)
+    return conn.execute(legacy.LEAD_SELECT + " WHERE l.phone = ?", (phone,)).fetchone()
+
+
+def _kit_metadata(record, conn, phone):
+    lead = _find_workspace_lead(conn, phone)
+    if not lead:
+        return {"available": False, "error": "Lead not found in this workspace."}
+    if not _configure_legacy_for_workspace(record):
+        return {
+            "available": False,
+            "supported": False,
+            "message": "Report cards and kits are currently available for Restaurants and Healthcare workspaces.",
+        }
+    card = legacy.kit_card_file(lead["phone"])
+    sent_at = legacy.kit_sent_at(conn, lead["phone"])
+    skip_reason = legacy.kit_skip_reason(lead)
+    return {
+        "available": not bool(skip_reason),
+        "supported": True,
+        "cardReady": bool(card),
+        "cardUrl": ("/api/report-card?workspace=" + urllib.parse.quote(record["key"]) +
+                    "&phone=" + urllib.parse.quote(lead["phone"])) if card else "",
+        "sentAt": sent_at or "",
+        "skipReason": skip_reason or "",
+        "message": legacy.kit_message(lead),
+        "brochureAvailable": not legacy.HEALTHCARE and Path(legacy.BROCHURE_PATH).exists(),
+        "brochureUrl": "/brochure?workspace=" + urllib.parse.quote(record["key"]),
+    }
+
+
+def _generate_report(record, phone):
+    if not _configure_legacy_for_workspace(record):
+        return False, "This workspace does not have a report generator yet."
+    normalized = _phone_key(phone)
+    script = Path(legacy.REPORT_CARD_SCRIPT)
+    if not script.exists():
+        return False, f"The report generator is missing: {script.name}."
+    try:
+        result = subprocess.run(
+            [sys.executable, str(script), normalized, "--no-update"],
+            cwd=HERE, timeout=180, capture_output=True, text=True,
+        )
+    except Exception as exc:
+        return False, f"The report generator could not start: {exc}"
+    card = legacy.kit_card_file(normalized)
+    if card:
+        return True, "Report generated successfully."
+    detail = (result.stderr or result.stdout or "").strip().splitlines()
+    return False, detail[-1] if detail else "The report generator finished without creating a report card."
+
+
+def _kit_action(record, phone, action):
+    conn = workspace_conn(record)
+    try:
+        lead = _find_workspace_lead(conn, phone)
+        if not lead:
+            return False, "Lead not found in this workspace."
+        if not _configure_legacy_for_workspace(record):
+            return False, "Kits are currently available for Restaurants and Healthcare only."
+        if action == "generate":
+            return _generate_report(record, lead["phone"])
+        if action == "mark":
+            legacy.mark_kit_sent(conn, lead["phone"])
+            return True, "Kit marked as sent."
+        if action == "autosend":
+            ok, message = legacy.autosend_kit(conn, lead["phone"])
+            if ok:
+                legacy.mark_kit_sent(conn, lead["phone"])
+            return ok, message
+        return False, "Unknown kit action."
+    finally:
+        conn.close()
 
 
 def _version_tuple(value):
@@ -265,8 +360,9 @@ def _signals(row):
     return signals[:5]
 
 
-def _serialize_lead(conn, row, workspace_label):
+def _serialize_lead(conn, row, workspace_label, record=None):
     remarks = legacy.fetch_remarks(conn, row["phone"])
+    kit = _kit_metadata(record, conn, row["phone"]) if record else {}
     return {
         "id": _lead_id(row["phone"]),
         "vertical": workspace_label,
@@ -299,6 +395,7 @@ def _serialize_lead(conn, row, workspace_label):
             for remark in remarks
             if remark["text"]
         ],
+        "kit": kit,
     }
 
 
@@ -336,7 +433,7 @@ def api_bootstrap(selected=None):
         conn = workspace_conn(record)
         try:
             rows = workspace_rows(conn)
-            all_leads.extend(_serialize_lead(conn, row, record["label"])
+            all_leads.extend(_serialize_lead(conn, row, record["label"], record)
                              for row in rows)
             all_runs.extend(_run_summary(rows, record["label"]))
         finally:
@@ -479,10 +576,69 @@ class VaaniHandler(legacy.Handler):
                            "Content-Disposition": 'attachment; filename="vaani-crm-export.csv"'
                        })
             return
+        if parsed.path == "/api/kit":
+            record = resolve_workspace(params.get("workspace", [None])[0])
+            conn = workspace_conn(record)
+            try:
+                self._send(200, json.dumps(_kit_metadata(
+                    record, conn, params.get("phone", [""])[0]
+                )), "application/json; charset=utf-8")
+            finally:
+                conn.close()
+            return
+        if parsed.path == "/api/report-card":
+            record = resolve_workspace(params.get("workspace", [None])[0])
+            if not _configure_legacy_for_workspace(record):
+                self._send(404, "Report cards are not available for this workspace.")
+                return
+            path = legacy.kit_card_file(params.get("phone", [""])[0])
+            if not path:
+                self._send(404, "Report card not generated yet.")
+                return
+            with open(path, "rb") as handle:
+                self._send(200, handle.read(), "image/png")
+            return
+        if parsed.path in ("/api/brochure", "/brochure"):
+            record = resolve_workspace(params.get("workspace", [None])[0])
+            if record["key"] != "restaurants":
+                self._send(404, "No brochure is configured for this workspace.")
+                return
+            brochure = HERE / "book-my-food-brochure.pdf"
+            if brochure.exists():
+                self._send(200, brochure.read_bytes(), "application/pdf", {
+                    "Content-Disposition": 'attachment; filename="book-my-food-brochure.pdf"'
+                })
+            else:
+                self._send(404, "Brochure not found.")
+            return
         legacy.Handler.do_GET(self)
 
     def do_POST(self):
         parsed = urllib.parse.urlparse(self.path)
+        if parsed.path in ("/api/kit-generate", "/api/kit-autosend", "/api/kit-sent"):
+            try:
+                length = int(self.headers.get("Content-Length", 0) or 0)
+                raw = self.rfile.read(length).decode("utf-8")
+                if self.headers.get("Content-Type", "").startswith("application/json"):
+                    payload = json.loads(raw or "{}")
+                else:
+                    payload = {key: values[0] for key, values in
+                               urllib.parse.parse_qs(raw).items()}
+                record = resolve_workspace(payload.get("workspace"))
+                action = "generate" if parsed.path.endswith("generate") else "autosend" if parsed.path.endswith("autosend") else "mark"
+                ok, message = _kit_action(record, payload.get("phone", ""), action)
+                refreshed = workspace_conn(record)
+                try:
+                    kit = _kit_metadata(record, refreshed, payload.get("phone", ""))
+                finally:
+                    refreshed.close()
+                self._send(200, json.dumps({"ok": ok, "message": message,
+                                           "kit": kit}),
+                           "application/json; charset=utf-8")
+            except Exception as exc:
+                self._send(400, json.dumps({"ok": False, "message": str(exc)}),
+                           "application/json; charset=utf-8")
+            return
         if parsed.path == "/api/sync":
             try:
                 length = int(self.headers.get("Content-Length", 0) or 0)

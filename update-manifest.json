@@ -1,21 +1,69 @@
 {
-  "version": "2.1.0",
+  "version": "2.2.0",
   "files": [
-    { "path": "vaani_crm.py", "sha256": "3efa726c0da89ddb2e7511f8bf7ce772fc98dfbbf4a9fbe8b06c0a8274ac672e" },
-    { "path": "vaani_crm_legacy.py", "sha256": "1232bf1c928fcd11d2136edfd77633cd92075a580092e996cad49d1bbc909838" },
-    { "path": "vaani.py", "sha256": "3deedcea03cabab2fe45304fe2ea544b980846d90224445664b0edcd4e4ea596" },
-    { "path": "report_card.py", "sha256": "695dd5b088353086b1317d818c766061952a9b8a154f5aced5a98cbcb29553f5" },
-    { "path": "clinic_report.py", "sha256": "f4025fda3898d3898c9629204e9d32df7e4e39c1a3235bd0a46712aa38a47c69" },
-    { "path": "kit_send.py", "sha256": "6bf6f09a80ced9d2f89370639134b6e17f4b3fef14cdaee0c8faada4dc5dcabe" },
-    { "path": "crm_notify.py", "sha256": "50b8a43ebd47040890a1cc1026fab267448eca027c1e94ff5cdf950551d99c1a" },
-    { "path": "requirements.txt", "sha256": "d0d75880c94c30f6de31334aae282341785ee856423c7c8bf116c3f7497354e5" },
-    { "path": "run-crm.bat", "sha256": "0f067a077d1e3e87636c6b58f7fe593e897205bbdaffc617e8ef69a2921a1ce4" },
-    { "path": "run-crm-healthcare.bat", "sha256": "9cd42497e2bd67f95b58865938140299699fdb93f16701b4040fd621b378a284" },
-    { "path": "vaani_ui/index.html", "sha256": "f225a421a270a611cf6c9b57bd355dac5562bead637f230702e1402d5c9dc52a" },
-    { "path": "vaani_ui/src/main.js", "sha256": "17d5a37770461f1b7a40e170c08dcc9676bd23155592cb29a788777b3f1c82ac" },
-    { "path": "vaani_ui/src/core.js", "sha256": "a7c2d21e0eb517bbb349b591d093ff852a6870de5c6bef8dc2b67bfa14f1b94c" },
-    { "path": "vaani_ui/src/styles.css", "sha256": "aa3f4c669cf3b7befc7a90e9a9c3adee00083557fee90c01c0d92ab62e852a50" },
-    { "path": "CRM-README.md", "sha256": "30d72a366c8365e7288d79df8ba802aab3ee65d68988e56a0fa2eb011bc2f6e2" },
-    { "path": "CLINIC-README.md", "sha256": "1a592a24ed0007f7f331034c787e6884c4e53b2048da86fd4596786a3cd36320" }
+    {
+      "path": "vaani_crm.py",
+      "sha256": "19117de7367d6c8685057572a87961e599afb198085673a15d4744c8ed673a06"
+    },
+    {
+      "path": "vaani_crm_legacy.py",
+      "sha256": "1232bf1c928fcd11d2136edfd77633cd92075a580092e996cad49d1bbc909838"
+    },
+    {
+      "path": "vaani.py",
+      "sha256": "3deedcea03cabab2fe45304fe2ea544b980846d90224445664b0edcd4e4ea596"
+    },
+    {
+      "path": "report_card.py",
+      "sha256": "695dd5b088353086b1317d818c766061952a9b8a154f5aced5a98cbcb29553f5"
+    },
+    {
+      "path": "clinic_report.py",
+      "sha256": "f4025fda3898d3898c9629204e9d32df7e4e39c1a3235bd0a46712aa38a47c69"
+    },
+    {
+      "path": "kit_send.py",
+      "sha256": "6bf6f09a80ced9d2f89370639134b6e17f4b3fef14cdaee0c8faada4dc5dcabe"
+    },
+    {
+      "path": "crm_notify.py",
+      "sha256": "50b8a43ebd47040890a1cc1026fab267448eca027c1e94ff5cdf950551d99c1a"
+    },
+    {
+      "path": "requirements.txt",
+      "sha256": "d0d75880c94c30f6de31334aae282341785ee856423c7c8bf116c3f7497354e5"
+    },
+    {
+      "path": "run-crm.bat",
+      "sha256": "0f067a077d1e3e87636c6b58f7fe593e897205bbdaffc617e8ef69a2921a1ce4"
+    },
+    {
+      "path": "run-crm-healthcare.bat",
+      "sha256": "9cd42497e2bd67f95b58865938140299699fdb93f16701b4040fd621b378a284"
+    },
+    {
+      "path": "vaani_ui/index.html",
+      "sha256": "f225a421a270a611cf6c9b57bd355dac5562bead637f230702e1402d5c9dc52a"
+    },
+    {
+      "path": "vaani_ui/src/main.js",
+      "sha256": "571ce6c9822f717347a537fc43a10e086570d62b26d4375fee330a99634599fe"
+    },
+    {
+      "path": "vaani_ui/src/core.js",
+      "sha256": "a7c2d21e0eb517bbb349b591d093ff852a6870de5c6bef8dc2b67bfa14f1b94c"
+    },
+    {
+      "path": "vaani_ui/src/styles.css",
+      "sha256": "e8ebd603c32b0d391595bdd35f7b6654d9e0ef756d3e924ea5ae0106aa8af75a"
+    },
+    {
+      "path": "CRM-README.md",
+      "sha256": "30d72a366c8365e7288d79df8ba802aab3ee65d68988e56a0fa2eb011bc2f6e2"
+    },
+    {
+      "path": "CLINIC-README.md",
+      "sha256": "1a592a24ed0007f7f331034c787e6884c4e53b2048da86fd4596786a3cd36320"
+    }
   ]
 }
