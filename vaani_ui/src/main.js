@@ -27,6 +27,8 @@ const reducedMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').ma
 const crmPort = Number(window.location.port || 0);
 const apiMode = Boolean(window.VAANI_API) || (crmPort >= 8765 && crmPort <= 8774);
 let apiReady = false;
+let workspaceSwitchRequest = 0;
+let workspaceSwitching = false;
 
 const ICONS = {
   grid: '<rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/>',
@@ -93,7 +95,10 @@ function saveState() {
     fetch('/api/sync', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ leads: state.leads }),
+      body: JSON.stringify({
+        workspace: state.workspace,
+        leads: state.leads.filter((lead) => lead.vertical === state.workspace),
+      }),
     }).catch(() => showToast('The local database could not be reached.', 'danger'));
     return;
   }
@@ -126,15 +131,47 @@ function normalizeApiLead(lead) {
   };
 }
 
-async function hydrateFromApi() {
-  const response = await fetch('/api/bootstrap', { cache: 'no-store' });
+async function hydrateFromApi(selectedWorkspace = state.workspace) {
+  const response = await fetch(`/api/bootstrap?workspace=${encodeURIComponent(selectedWorkspace || '')}`, { cache: 'no-store' });
   if (!response.ok) throw new Error(`CRM API returned ${response.status}`);
   const payload = await response.json();
   state.workspace = payload.workspace || state.workspace;
+  state.workspaces = Array.isArray(payload.workspaces) && payload.workspaces.length
+    ? payload.workspaces
+    : state.workspaces;
   state.leads = Array.isArray(payload.leads) ? payload.leads.map(normalizeApiLead) : state.leads;
   state.runs = Array.isArray(payload.runs) ? payload.runs : state.runs;
   state.lastSavedAt = payload.lastSavedAt || new Date().toISOString();
   apiReady = true;
+}
+
+async function switchWorkspace(nextWorkspace) {
+  const previousWorkspace = state.workspace;
+  if (!nextWorkspace || nextWorkspace === previousWorkspace) return;
+  const requestId = ++workspaceSwitchRequest;
+  workspaceSwitching = true;
+  state.workspace = nextWorkspace;
+  state.selectedIds = [];
+  state.filters = { status: 'all', tier: 'all', date: 'all' };
+  state.query = '';
+  document.querySelectorAll('[data-workspace]').forEach((control) => {
+    control.disabled = true;
+    control.setAttribute('aria-busy', 'true');
+  });
+  showToast(`Loading ${nextWorkspace} workspace…`);
+  try {
+    if (apiMode) await hydrateFromApi(nextWorkspace);
+    if (requestId !== workspaceSwitchRequest) return;
+    renderLayout();
+    showToast(`${state.workspace} workspace ready`);
+  } catch {
+    if (requestId !== workspaceSwitchRequest) return;
+    state.workspace = previousWorkspace;
+    renderLayout();
+    showToast(`Could not load ${nextWorkspace}. Your current workspace is still active.`, 'danger');
+  } finally {
+    if (requestId === workspaceSwitchRequest) workspaceSwitching = false;
+  }
 }
 
 function todayLabel() {
@@ -211,14 +248,14 @@ function renderLayout() {
   };
   const title = pageTitles[state.view] || 'Overview';
   const navItem = (view, label, iconName, badge = '') => `<a class="nav-item ${state.view === view ? 'is-active' : ''}" href="#${view}" data-view="${view}" data-nav="${view}">${icon(iconName, 18)}<span>${label}</span>${badge ? `<span class="nav-badge">${badge}</span>` : ''}</a>`;
-  const workspaceLabel = state.workspace === 'Healthcare' ? 'Healthcare' : 'Restaurants';
+  const workspaces = state.workspaces?.length ? state.workspaces : [{ key: 'restaurants', label: 'Restaurants' }, { key: 'healthcare', label: 'Healthcare' }];
 
   app.innerHTML = `<div class="app-frame ${state.mobileNavOpen ? 'nav-open' : ''}">
     <aside class="sidebar" data-sidebar>
       <div class="brand-lockup"><div class="brand-mark">V</div><div><strong>vaani</strong><span>lead workspace</span></div></div>
       <div class="workspace-picker">
         <label for="workspace-select">Workspace</label>
-        <div class="workspace-select-wrap"><span class="workspace-dot"></span><select id="workspace-select" data-workspace aria-label="Choose workspace" ${apiMode ? 'disabled' : ''}><option ${workspaceLabel === 'Restaurants' ? 'selected' : ''}>Restaurants</option><option ${workspaceLabel === 'Healthcare' ? 'selected' : ''}>Healthcare</option></select>${icon('chevron', 15)}</div>
+         <div class="workspace-select-wrap"><span class="workspace-dot"></span><select id="workspace-select" data-workspace aria-label="Choose workspace">${workspaces.map((workspace) => `<option value="${escapeHtml(workspace.label)}" ${workspace.label === state.workspace ? 'selected' : ''}>${escapeHtml(workspace.label)}</option>`).join('')}</select>${icon('chevron', 15)}</div>
       </div>
       <div class="sidebar-section-label">Workspace</div>
       <nav class="primary-nav" aria-label="Primary navigation">
@@ -367,7 +404,8 @@ function runCard(run) {
 
 function renderSettings() {
   const metrics = getMetrics(state.leads, state.workspace);
-  return `<section class="page-heading"><div><div class="eyebrow"><span class="eyebrow-dot"></span>Workspace controls</div><h1>Settings</h1><p>Keep this local workspace tidy, portable and easy to hand off.</p></div></section><section class="settings-grid"><article class="panel settings-card"><div class="settings-card__icon">${icon('users', 19)}</div><div><h2>Workspace identity</h2><p>Current section</p><strong>${escapeHtml(state.workspace)}</strong><small>${apiMode ? 'Launch the matching batch file to switch between restaurant and healthcare databases.' : 'Switch sections from the sidebar. Food and healthcare leads remain separate.'}</small></div><select data-workspace ${apiMode ? 'disabled' : ''}><option ${state.workspace === 'Restaurants' ? 'selected' : ''}>Restaurants</option><option ${state.workspace === 'Healthcare' ? 'selected' : ''}>Healthcare</option></select></article><article class="panel settings-card"><div class="settings-card__icon settings-card__icon--green">${icon('download', 19)}</div><div><h2>Data portability</h2><p>Export a clean snapshot of this workspace</p><strong>${metrics.total} leads ready</strong><small>CSV includes contact data, scores, statuses, follow-ups and source fields.</small></div><button class="button button--secondary" data-export>Export CSV ${icon('arrow', 14)}</button></article><article class="panel settings-card"><div class="settings-card__icon settings-card__icon--amber">${icon('clock', 19)}</div><div><h2>Autosave</h2><p>${apiMode ? 'SQLite sync is active' : 'Browser storage is active'}</p><strong>Saved ${formatRelative(state.lastSavedAt)}</strong><small>${apiMode ? 'Every status, note and follow-up change is saved to the local CRM database.' : 'Every status, note and follow-up change is saved to this browser.'}</small></div><span class="settings-live"><i></i>Active</span></article><article class="panel settings-card settings-card--danger"><div class="settings-card__icon settings-card__icon--red">${icon('settings', 19)}</div><div><h2>${apiMode ? 'Database backups' : 'Reset demo workspace'}</h2><p>${apiMode ? 'Backups are kept beside the local database' : 'Restore the sample data and clear local edits'}</p><strong>${apiMode ? 'Protected locally' : 'This cannot be undone'}</strong><small>${apiMode ? 'The CRM refreshes a rolling database backup on startup.' : 'Use this when you want to review the first-run experience again.'}</small></div>${apiMode ? '<span class="settings-live"><i></i>Protected</span>' : '<button class="button button--danger" data-reset-demo>Reset demo</button>'}</article></section>`;
+  const workspaces = state.workspaces?.length ? state.workspaces : [{ label: state.workspace }];
+  return `<section class="page-heading"><div><div class="eyebrow"><span class="eyebrow-dot"></span>Workspace controls</div><h1>Settings</h1><p>Keep this local workspace tidy, portable and easy to hand off.</p></div></section><section class="settings-grid"><article class="panel settings-card"><div class="settings-card__icon">${icon('users', 19)}</div><div><h2>Workspace identity</h2><p>Current section</p><strong>${escapeHtml(state.workspace)}</strong><small>${apiMode ? 'Switch instantly between every database found by the CRM.' : 'Switch sections from the sidebar.'}</small></div><select data-workspace>${workspaces.map((workspace) => `<option value="${escapeHtml(workspace.label)}" ${workspace.label === state.workspace ? 'selected' : ''}>${escapeHtml(workspace.label)}</option>`).join('')}</select></article><article class="panel settings-card"><div class="settings-card__icon settings-card__icon--green">${icon('download', 19)}</div><div><h2>Data portability</h2><p>Export a clean snapshot of this workspace</p><strong>${metrics.total} leads ready</strong><small>CSV includes contact data, scores, statuses, follow-ups and source fields.</small></div><button class="button button--secondary" data-export>Export CSV ${icon('arrow', 14)}</button></article><article class="panel settings-card"><div class="settings-card__icon settings-card__icon--amber">${icon('clock', 19)}</div><div><h2>Autosave</h2><p>${apiMode ? 'SQLite sync is active' : 'Browser storage is active'}</p><strong>Saved ${formatRelative(state.lastSavedAt)}</strong><small>${apiMode ? 'Every status, note and follow-up change is saved to the selected local database.' : 'Every status, note and follow-up change is saved to this browser.'}</small></div><span class="settings-live"><i></i>Active</span></article><article class="panel settings-card settings-card--danger"><div class="settings-card__icon settings-card__icon--red">${icon('settings', 19)}</div><div><h2>${apiMode ? 'Database backups' : 'Reset demo workspace'}</h2><p>${apiMode ? 'Backups are kept beside each local database' : 'Restore the sample data and clear local edits'}</p><strong>${apiMode ? 'Protected locally' : 'This cannot be undone'}</strong><small>${apiMode ? 'Workspace databases remain local and are not replaced by category switching.' : 'Use this when you want to review the first-run experience again.'}</small></div>${apiMode ? '<span class="settings-live"><i></i>Protected</span>' : '<button class="button button--danger" data-reset-demo>Reset demo</button>'}</article></section>`;
 }
 
 function emptyState(title, body, actionLabel = '', action = '') {
@@ -481,7 +519,7 @@ function openDialog(kind, preset = {}) {
   const dialogRoot = document.querySelector('#dialog-root') || document.body.appendChild(document.createElement('div'));
   dialogRoot.id = 'dialog-root';
   const isImport = kind === 'import';
-  const importCopy = apiMode ? 'Run the scraper from Command Prompt with vaani.py, then reopen the CRM. The database-backed workspace will show the new leads automatically.' : 'Bring a location search into the workspace. Demo mode adds a realistic sample run and keeps every new record local.';
+  const importCopy = apiMode ? 'Run vaani.py from Command Prompt in another window. This CRM checks for new category databases automatically and adds them to the Workspace switcher without restarting.' : 'Bring a location search into the workspace. Demo mode adds a realistic sample run and keeps every new record local.';
   dialogRoot.innerHTML = `<dialog class="modal" data-modal><form method="dialog" class="modal-card" data-modal-form data-modal-kind="${kind}"><button type="button" class="icon-button modal-close" data-close-modal aria-label="Close">${icon('close', 18)}</button><div class="eyebrow"><span class="eyebrow-dot"></span>${isImport ? 'New data source' : 'Manual entry'}</div><h2>${isImport ? 'Import a fresh scrape' : 'Add a lead'}</h2><p>${isImport ? importCopy : 'Add one business directly when you have a lead that did not come from a scrape.'}</p>${isImport ? `<div class="modal-form-grid"><label>Location<input name="location" ${apiMode ? '' : 'required'} value="${escapeHtml(preset.location || '')}" placeholder="e.g. Prahlad Nagar, Ahmedabad"></label><label>Category<select name="category"><option>Restaurants</option><option>Delivery-first restaurants</option><option>Cafés</option><option>Dental clinics</option><option>Physiotherapy clinics</option></select></label><label>Workspace<select name="vertical"><option ${state.workspace === 'Restaurants' ? 'selected' : ''}>Restaurants</option><option ${state.workspace === 'Healthcare' ? 'selected' : ''}>Healthcare</option></select></label><label>Places to keep<select name="count"><option value="4">4 leads</option><option value="6" selected>6 leads</option><option value="8">8 leads</option></select></label></div><label class="check-field"><input type="checkbox" name="emails" checked><span><strong>Check websites for emails</strong><small>Add public contact signals to the imported record.</small></span></label>` : `<div class="modal-form-grid"><label>Business name<input name="name" required placeholder="The new lead"></label><label>Contact name<input name="contact" placeholder="Owner or decision-maker"></label><label>Mobile number<input name="phone" required placeholder="+91 98…"></label><label>Email<input name="email" type="email" placeholder="hello@business.in"></label><label>Location<input name="location" placeholder="Area, city"></label><label>Website<input name="website" placeholder="business.in"></label><label>Workspace<select name="vertical"><option ${state.workspace === 'Restaurants' ? 'selected' : ''}>Restaurants</option><option ${state.workspace === 'Healthcare' ? 'selected' : ''}>Healthcare</option></select></label><label>Tier<select name="tier"><option>A</option><option selected>B</option><option>C</option></select></label></div>`}<div class="modal-actions"><button type="button" class="button button--secondary" data-close-modal>Cancel</button><button class="button button--primary" type="submit">${isImport ? (apiMode ? 'Close' : 'Import leads') : 'Save lead'} ${icon('arrow', 15)}</button></div></form></dialog>`;
   const dialog = dialogRoot.querySelector('dialog');
   if (typeof dialog.showModal === 'function') dialog.showModal();
@@ -502,7 +540,7 @@ function handleModalSubmit(form) {
   if (kind === 'import') {
     if (apiMode) {
       closeDialog();
-      showToast('Run vaani.py from Command Prompt, then reopen the CRM to see new leads.');
+      showToast('Run vaani.py from Command Prompt. New categories will appear here automatically.');
       return;
     }
     const count = Number(values.count) || 6;
@@ -684,13 +722,18 @@ function handleClick(event) {
 function handleChange(event) {
   const target = event.target;
   if (target.matches('[data-workspace]')) {
-    state.workspace = target.value;
-    state.selectedIds = [];
-    state.filters = { status: 'all', tier: 'all', date: 'all' };
-    state.query = '';
-    saveState();
-    renderLayout();
-    showToast(`${state.workspace} workspace selected`);
+    if (workspaceSwitching) return;
+    if (apiMode) {
+      switchWorkspace(target.value);
+    } else {
+      state.workspace = target.value;
+      state.selectedIds = [];
+      state.filters = { status: 'all', tier: 'all', date: 'all' };
+      state.query = '';
+      saveState();
+      renderLayout();
+      showToast(`${state.workspace} workspace selected`);
+    }
     return;
   }
   if (target.matches('[data-status-filter]')) {
@@ -847,6 +890,20 @@ async function init() {
   window.addEventListener('popstate', syncRoute);
   window.addEventListener('hashchange', syncRoute);
   window.__VAANI_CRM__ = { state, getMetrics, filterLeads, createLead, validateLead };
+  if (apiMode) {
+    window.setInterval(async () => {
+      if (workspaceSwitching) return;
+      try {
+        const before = (state.workspaces || []).map((workspace) => workspace.label).join('|');
+        await hydrateFromApi(state.workspace);
+        const after = (state.workspaces || []).map((workspace) => workspace.label).join('|');
+        renderLayout();
+        if (before !== after) showToast('A new CRM workspace is ready to use.');
+      } catch {
+        // Keep the current local view if the scraper is still running.
+      }
+    }, 10000);
+  }
   if (apiError) showToast('Could not load the local CRM database.', 'danger');
 }
 

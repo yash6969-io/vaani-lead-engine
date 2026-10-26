@@ -1,9 +1,9 @@
 @echo off
-title Vaani CRM - Healthcare
+title Vaani CRM - All Workspaces
 cd /d "%~dp0"
 echo.
-echo   VAANI CRM - HEALTHCARE SECTION (clinics, Content365)
-echo   ----------------------------------------------------
+echo   VAANI CRM - ALL WORKSPACES
+echo   --------------------------
 echo.
 where py >nul 2>nul
 if errorlevel 1 (
@@ -15,10 +15,10 @@ if errorlevel 1 (
   pause
   exit /b 1
 )
-echo   Starting the Healthcare CRM - checking for updates first.
-echo   This is the CLINICS section only - your restaurant CRM is separate.
+echo   Starting the CRM - Restaurants, Healthcare and new categories
+echo   are available from one Workspace switcher.
 echo   Keep THIS window open while you work in the CRM.
 echo   Close this window when you are done.
 echo.
-py vaani_crm.py --section healthcare
+py vaani_crm.py
 pause

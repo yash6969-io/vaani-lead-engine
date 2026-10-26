@@ -8,11 +8,14 @@ safe allow-listed self-updater that never touches local data files.
 """
 
 import hashlib
+import csv
+import io
 import json
 import mimetypes
 import os
 import re
 import shutil
+import sqlite3
 import subprocess
 import sys
 import urllib.parse
@@ -54,6 +57,93 @@ UPDATE_ALLOWLIST = {
     "CRM-README.md",
     "CLINIC-README.md",
 }
+
+CRM_PORTS = (8765, 8766, 8767, 8768, 8769)
+
+
+def _workspace_label_from_slug(slug):
+    return " ".join(part.capitalize() for part in slug.replace("_", "-").split("-"))
+
+
+def _ensure_workspace_schema(conn, label):
+    conn.execute("""CREATE TABLE IF NOT EXISTS leads (
+        phone TEXT PRIMARY KEY, name TEXT, address TEXT, website TEXT,
+        email TEXT, rating REAL, reviews INTEGER, score INTEGER,
+        tier TEXT, angle TEXT, first_seen TEXT, last_seen TEXT,
+        times_seen INTEGER DEFAULT 1, suppressed INTEGER DEFAULT 0,
+        suppress_reason TEXT, suppressed_on TEXT)""")
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(leads)")}
+    if "suppressed_on" not in columns:
+        conn.execute("ALTER TABLE leads ADD COLUMN suppressed_on TEXT")
+    conn.execute("""CREATE TABLE IF NOT EXISTS crm_state (
+        phone TEXT PRIMARY KEY, status TEXT DEFAULT 'Not called',
+        followup TEXT DEFAULT '', updated_at TEXT)""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS crm_remarks (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, phone TEXT, ts TEXT,
+        text TEXT, source TEXT DEFAULT 'app')""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS crm_meta (
+        key TEXT PRIMARY KEY, value TEXT)""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS kit_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, phone TEXT, ts TEXT,
+        channel TEXT DEFAULT 'whatsapp')""")
+    conn.execute(
+        "INSERT OR IGNORE INTO crm_meta (key, value) VALUES ('workspace_label', ?)",
+        (label,),
+    )
+    conn.commit()
+
+
+def discover_workspaces():
+    """Find built-in and scraper-created category databases."""
+    records = []
+    paths = [("restaurants", "Restaurants", HERE / "vaani_master.db"),
+             ("healthcare", "Healthcare", HERE / "vaani_healthcare.db")]
+    known = {path.resolve() for _, _, path in paths}
+    for path in sorted(HERE.glob("vaani_*.db")):
+        if path.name.endswith(".crm-backup") or path.resolve() in known:
+            continue
+        slug = path.stem[len("vaani_"):]
+        if slug:
+            paths.append((slug, _workspace_label_from_slug(slug), path))
+    for key, fallback_label, path in paths:
+        if not path.exists() and key not in ("restaurants", "healthcare"):
+            continue
+        try:
+            conn = sqlite3.connect(path)
+            conn.row_factory = sqlite3.Row
+            _ensure_workspace_schema(conn, fallback_label)
+            meta = conn.execute(
+                "SELECT value FROM crm_meta WHERE key='workspace_label'"
+            ).fetchone()
+            label = (meta[0] if meta and meta[0] else fallback_label)
+            conn.close()
+            records.append({"key": key, "label": label, "path": path})
+        except Exception:
+            continue
+    return records
+
+
+def resolve_workspace(value=None):
+    records = discover_workspaces()
+    if not records:
+        raise RuntimeError("No CRM workspace database is available")
+    wanted = str(value or "").strip().lower()
+    for record in records:
+        if wanted in (record["key"].lower(), record["label"].lower()):
+            return record
+    return records[0]
+
+
+def workspace_conn(record):
+    conn = sqlite3.connect(record["path"])
+    conn.row_factory = sqlite3.Row
+    _ensure_workspace_schema(conn, record["label"])
+    return conn
+
+
+def workspace_rows(conn):
+    return conn.execute(legacy.LEAD_SELECT +
+                        " ORDER BY (l.score IS NULL), l.score DESC, l.reviews DESC").fetchall()
 
 
 def _version_tuple(value):
@@ -175,11 +265,12 @@ def _signals(row):
     return signals[:5]
 
 
-def _serialize_lead(conn, row):
+def _serialize_lead(conn, row, workspace_label):
     remarks = legacy.fetch_remarks(conn, row["phone"])
     return {
         "id": _lead_id(row["phone"]),
-        "vertical": legacy.SECTION_LABEL,
+        "vertical": workspace_label,
+        "workspaceKey": "",
         "name": row["name"] or "Unnamed lead",
         "contact": "",
         "location": row["address"] or "",
@@ -211,7 +302,7 @@ def _serialize_lead(conn, row):
     }
 
 
-def _run_summary(rows):
+def _run_summary(rows, workspace_label):
     grouped = defaultdict(list)
     for row in rows:
         grouped[_json_safe_date(row["first_seen"])].append(row)
@@ -224,7 +315,7 @@ def _run_summary(rows):
         contacts = sum(1 for row in group if row["phone"])
         runs.append({
             "id": f"run-{assigned}",
-            "vertical": legacy.SECTION_LABEL,
+            "vertical": workspace_label,
             "location": location or "Local database",
             "category": "Scraped leads",
             "createdAt": f"{assigned}T12:00:00",
@@ -236,15 +327,49 @@ def _run_summary(rows):
     return runs[:90]
 
 
-def api_bootstrap(conn):
-    rows = legacy.fetch_leads(conn, sort="score")
+def api_bootstrap(selected=None):
+    records = discover_workspaces()
+    active = resolve_workspace(selected)
+    all_leads = []
+    all_runs = []
+    for record in records:
+        conn = workspace_conn(record)
+        try:
+            rows = workspace_rows(conn)
+            all_leads.extend(_serialize_lead(conn, row, record["label"])
+                             for row in rows)
+            all_runs.extend(_run_summary(rows, record["label"]))
+        finally:
+            conn.close()
     return {
         "version": VERSION,
-        "workspace": legacy.SECTION_LABEL,
-        "leads": [_serialize_lead(conn, row) for row in rows],
-        "runs": _run_summary(rows),
+        "workspace": active["label"],
+        "workspaces": [{"key": r["key"], "label": r["label"]} for r in records],
+        "leads": all_leads,
+        "runs": all_runs,
         "lastSavedAt": datetime.now().isoformat(timespec="seconds"),
     }
+
+
+def export_workspace_csv(record):
+    conn = workspace_conn(record)
+    try:
+        buf = io.StringIO()
+        writer = csv.writer(buf)
+        writer.writerow(["Business", "Phone", "Location", "Email", "Website",
+                         "Rating", "Reviews", "Score", "Tier", "Pitch Angle",
+                         "Status", "Follow-up Date", "Remarks", "First Seen",
+                         "Last Seen", "Times Seen"])
+        for row in workspace_rows(conn):
+            writer.writerow([row["name"], row["phone"], row["address"],
+                             row["email"], row["website"], row["rating"],
+                             row["reviews"], row["score"], row["tier"],
+                             row["angle"], row["status"], row["followup"],
+                             row["n_remarks"], row["first_seen"],
+                             row["last_seen"], row["times_seen"]])
+        return buf.getvalue()
+    finally:
+        conn.close()
 
 
 def sync_client_state(conn, payload):
@@ -336,16 +461,24 @@ class VaaniHandler(legacy.Handler):
             if self._serve_ui(parsed.path.lstrip("/")):
                 return
         params = urllib.parse.parse_qs(parsed.query)
-        conn = legacy.get_conn()
-        try:
-            if parsed.path == "/api/bootstrap":
-                self._send(200, json.dumps(api_bootstrap(conn)), "application/json; charset=utf-8")
-                return
-            if parsed.path == "/api/export.csv":
-                self._send(200, legacy.export_csv_text(conn), "text/csv; charset=utf-8", {"Content-Disposition": 'attachment; filename="vaani-crm-export.csv"'})
-                return
-        finally:
-            conn.close()
+        if parsed.path == "/api/bootstrap":
+            selected = params.get("workspace", [None])[0]
+            self._send(200, json.dumps(api_bootstrap(selected)),
+                       "application/json; charset=utf-8")
+            return
+        if parsed.path == "/api/workspaces":
+            self._send(200, json.dumps({
+                "workspaces": [{"key": r["key"], "label": r["label"]}
+                                for r in discover_workspaces()]
+            }), "application/json; charset=utf-8")
+            return
+        if parsed.path == "/api/export.csv":
+            record = resolve_workspace(params.get("workspace", [None])[0])
+            self._send(200, export_workspace_csv(record),
+                       "text/csv; charset=utf-8", {
+                           "Content-Disposition": 'attachment; filename="vaani-crm-export.csv"'
+                       })
+            return
         legacy.Handler.do_GET(self)
 
     def do_POST(self):
@@ -357,7 +490,8 @@ class VaaniHandler(legacy.Handler):
                     self._send(413, "Too large")
                     return
                 payload = json.loads(self.rfile.read(length).decode("utf-8"))
-                conn = legacy.get_conn()
+                record = resolve_workspace(payload.get("workspace"))
+                conn = workspace_conn(record)
                 try:
                     changed = sync_client_state(conn, payload)
                 finally:
@@ -371,28 +505,22 @@ class VaaniHandler(legacy.Handler):
 
 def main():
     self_update()
-    conn = legacy.get_conn()
-    try:
-        legacy.backup_db()
-        imported = legacy.import_tracker(conn)
-    finally:
-        conn.close()
     server = None
-    for port in legacy.PORTS:
+    for port in CRM_PORTS:
         try:
             server = ThreadingHTTPServer(("127.0.0.1", port), VaaniHandler)
             break
         except OSError:
             continue
     if server is None:
-        print(f"  Could not start Vaani CRM - ports {legacy.PORTS[0]}-{legacy.PORTS[-1]} are busy.")
+        print(f"  Could not start Vaani CRM - ports {CRM_PORTS[0]}-{CRM_PORTS[-1]} are busy.")
         return
     url = f"http://127.0.0.1:{server.server_address[1]}/"
     print()
-    print(f"  VAANI CRM v{VERSION}  ({legacy.SECTION_LABEL} section)")
-    print("  ----------------------")
-    if imported:
-        print(f"  Imported {imported} lead(s) from your Excel tracker.")
+    print(f"  VAANI CRM v{VERSION}  (all workspaces)")
+    print("  ----------------------------")
+    print("  Restaurants, Healthcare and scraper-created categories are available")
+    print("  from the Workspace switcher in this one browser window.")
     print(f"  Open in your browser: {url}")
     print("  Your local SQLite database and trackers stay in this folder.")
     print("  To stop: close this window or press Ctrl+C.")

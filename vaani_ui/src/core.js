@@ -71,7 +71,7 @@ export function seedRuns() {
 }
 
 export function createInitialState() {
-  return { view: 'dashboard', workspace: 'Restaurants', leads: seedLeads(), runs: seedRuns(), selectedLeadId: null, query: '', filters: { status: 'all', tier: 'all', date: 'all' }, sort: 'score', selectedIds: [], followupTab: 'today', mobileNavOpen: false, lastSavedAt: new Date().toISOString() };
+  return { view: 'dashboard', workspace: 'Restaurants', workspaces: [{ key: 'restaurants', label: 'Restaurants' }, { key: 'healthcare', label: 'Healthcare' }], leads: seedLeads(), runs: seedRuns(), selectedLeadId: null, query: '', filters: { status: 'all', tier: 'all', date: 'all' }, sort: 'score', selectedIds: [], followupTab: 'today', mobileNavOpen: false, lastSavedAt: new Date().toISOString() };
 }
 
 export function filterLeads(leads, { workspace = 'Restaurants', query = '', status = 'all', tier = 'all', date = 'all' } = {}) {

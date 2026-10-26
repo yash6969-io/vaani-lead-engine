@@ -61,11 +61,11 @@ img, svg { display: block; }
 .brand-lockup span { display: block; margin-top: 2px; color: #8faab3; font-size: 11px; letter-spacing: .04em; text-transform: uppercase; }
 .workspace-picker { margin: 0 15px 25px; padding: 12px 13px 13px; border: 1px solid rgba(255,255,255,.09); border-radius: 12px; background: rgba(255,255,255,.045); }
 .workspace-picker label { display: block; margin-bottom: 7px; color: #88a5ae; font-size: 10px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; }
-.workspace-select-wrap { display: flex; align-items: center; gap: 8px; }
+.workspace-select-wrap { position: relative; display: flex; align-items: center; gap: 8px; min-height: 34px; }
 .workspace-dot, .online-dot { display: inline-block; width: 7px; height: 7px; flex: 0 0 auto; border-radius: 50%; background: #39d9ae; box-shadow: 0 0 0 4px rgba(57,217,174,.12); }
-.workspace-select-wrap select { min-width: 0; flex: 1; appearance: none; border: 0; outline: 0; background: transparent; color: #fff; font-size: 13px; font-weight: 650; cursor: pointer; }
+.workspace-select-wrap select { position: relative; z-index: 2; width: 100%; min-width: 0; flex: 1; height: 34px; appearance: auto; border: 0; outline: 0; background: var(--navy); color: #fff; font-size: 13px; font-weight: 650; cursor: pointer; }
 .workspace-select-wrap select option { color: var(--ink); }
-.workspace-select-wrap .icon { color: #88a5ae; transform: rotate(90deg); }
+.workspace-select-wrap .icon { position: absolute; z-index: 1; right: 2px; color: #88a5ae; transform: rotate(90deg); pointer-events: none; }
 .sidebar-section-label { padding: 0 24px 8px; color: #6e8993; font-size: 10px; font-weight: 750; letter-spacing: .14em; text-transform: uppercase; }
 .sidebar-section-label--spaced { margin-top: 20px; }
 .primary-nav { display: grid; gap: 3px; padding: 0 12px; }

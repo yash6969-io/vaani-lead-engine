@@ -825,6 +825,8 @@ VERTICALS = {
     },
 }
 VCFG = VERTICALS["food"]
+WORKSPACE_KEY = "restaurants"
+WORKSPACE_LABEL = "Restaurants"
 HEALTHCARE_HINTS = ("clinic", "hospital", "dental", "dentist",
                     "doctor", "physio", "diagnostic", "pharmacy",
                     "nursing", "ayurved", "homeopath")
@@ -834,7 +836,52 @@ def apply_vertical(name):
     """Point every data file at the chosen vertical. Called once,
     from main(), before anything is read or written."""
     global MASTER_DB, TRACKER_NAME, WINBACK_NAME, VCFG
+    global WORKSPACE_KEY, WORKSPACE_LABEL
     VCFG = VERTICALS[name]
+    WORKSPACE_KEY = "healthcare" if name == "healthcare" else "restaurants"
+    WORKSPACE_LABEL = "Healthcare" if name == "healthcare" else "Restaurants"
+    MASTER_DB = VCFG["db"]
+    TRACKER_NAME = VCFG["tracker"]
+    WINBACK_NAME = VCFG["winback"]
+    TRACKER_HEADERS[1] = VCFG["name_header"]
+
+
+def apply_category(category, vertical="food"):
+    """Route each scrape into its own CRM workspace automatically.
+
+    Restaurants and healthcare retain their established databases. Any new
+    category (Gyms, Schools, Salons, etc.) gets a separate SQLite database
+    and tracker without requiring another CRM launcher.
+    """
+    text = str(category or "").strip()
+    lowered = text.lower()
+    if vertical == "healthcare" or any(hint in lowered for hint in HEALTHCARE_HINTS):
+        apply_vertical("healthcare")
+        return
+    restaurant_words = (
+        "restaurant", "restaurants", "food", "cafe", "cafes", "café",
+        "delivery", "cloud kitchen", "eatery", "eateries", "dining",
+    )
+    if not text or any(word in lowered for word in restaurant_words):
+        apply_vertical("food")
+        return
+    safe = re.sub(r"[^a-z0-9]+", "-", lowered).strip("-") or "other"
+    label = " ".join(part.capitalize() for part in safe.split("-"))
+    global MASTER_DB, TRACKER_NAME, WINBACK_NAME, VCFG
+    global WORKSPACE_KEY, WORKSPACE_LABEL
+    WORKSPACE_KEY = safe
+    WORKSPACE_LABEL = label
+    VCFG = {
+        "label": label,
+        "db": f"vaani_{safe}.db",
+        "tracker": f"vaani-{safe}-tracker.xlsx",
+        "winback": f"vaani-{safe}-not-interested.xlsx",
+        "name_header": "Business name",
+        "names_file": f"{safe}_names.csv",
+        "names_col": "business_name",
+        "count_label": f"{label} in your database",
+        "folder_prefix": f"{safe}_",
+    }
     MASTER_DB = VCFG["db"]
     TRACKER_NAME = VCFG["tracker"]
     WINBACK_NAME = VCFG["winback"]
@@ -855,6 +902,12 @@ def _master():
     if "suppressed_on" not in cols:
         db.execute("ALTER TABLE leads ADD COLUMN suppressed_on TEXT")
         db.commit()
+    db.execute("CREATE TABLE IF NOT EXISTS crm_meta (key TEXT PRIMARY KEY, value TEXT)")
+    db.execute(
+        "INSERT OR REPLACE INTO crm_meta (key, value) VALUES (?, ?)",
+        ("workspace_label", WORKSPACE_LABEL),
+    )
+    db.commit()
     return db
 
 
@@ -1484,8 +1537,9 @@ def main():
                          "(delivery + dine-in or cloud kitchen, not "
                          "famous, not carts, everyday prices)")
     a = ap.parse_args()
-    apply_vertical(a.vertical)
-    if a.segment and a.vertical != "food":
+    requested_category = a.category
+    apply_category(requested_category, a.vertical)
+    if a.segment and WORKSPACE_KEY != "restaurants":
         print("  (Note: --segment only applies to restaurants, so it "
               "is ignored for this healthcare run.)")
         a.segment = None
@@ -1499,19 +1553,10 @@ def main():
         sys.exit("  No location given - nothing to search.")
     print()
 
-    if a.vertical == "food" and any(h in a.category.lower()
-                                    for h in HEALTHCARE_HINTS):
-        print("  (!) This category sounds like HEALTHCARE, but the")
-        print("      vertical is set to restaurants - these leads")
-        print("      would land in your RESTAURANT database, mixed")
-        print("      with your restaurant leads.")
-        print("      To keep them separate, stop now (Ctrl+C) and")
-        print("      run again with:  --vertical healthcare")
-        try:
-            input("      Press Enter to continue anyway: ")
-        except EOFError:
-            pass
-        print()
+    if a.vertical == "food" and WORKSPACE_KEY == "healthcare":
+        print("  Category recognised as healthcare - using the Healthcare workspace.")
+    elif WORKSPACE_KEY not in ("restaurants", "healthcare"):
+        print(f"  New category recognised - using the separate {WORKSPACE_LABEL} workspace.")
 
     rows = scrape(location, a.category, a.max, a.email, a.headless)
     if not rows:
