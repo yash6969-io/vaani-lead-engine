@@ -29,6 +29,7 @@ const apiMode = Boolean(window.VAANI_API) || (crmPort >= 8765 && crmPort <= 8774
 let apiReady = false;
 let workspaceSwitchRequest = 0;
 let workspaceSwitching = false;
+let syncRequest = null;
 
 const ICONS = {
   grid: '<rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/>',
@@ -93,14 +94,24 @@ function saveState() {
   state.lastSavedAt = new Date().toISOString();
   if (apiMode) {
     if (!apiReady) return;
-    fetch('/api/sync', {
+    syncRequest = fetch('/api/sync', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         workspace: state.workspace,
         leads: state.leads.filter((lead) => lead.vertical === state.workspace),
       }),
-    }).catch(() => showToast('The local database could not be reached.', 'danger'));
+    }).then(async (response) => {
+      let result = {};
+      try { result = await response.json(); } catch { /* response may be empty */ }
+      if (!response.ok || result.ok === false) {
+        throw new Error(result.message || result.error || `Database request failed (${response.status})`);
+      }
+      return result;
+    }).catch((error) => {
+      showToast(error.message || 'The local database could not be reached.', 'danger');
+      return { ok: false, error: error.message };
+    }).finally(() => { syncRequest = null; });
     return;
   }
   localStorage.setItem(STORAGE_KEY, JSON.stringify({
@@ -109,6 +120,21 @@ function saveState() {
     selectedLeadId: null,
     mobileNavOpen: false,
   }));
+}
+
+async function postJson(path, payload) {
+  const response = await fetch(path, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  const text = await response.text();
+  let result = {};
+  try { result = JSON.parse(text); } catch { /* handled by the error below */ }
+  if (!response.ok || result.ok === false) {
+    throw new Error(result.message || result.error || `CRM request failed (${response.status})`);
+  }
+  return result;
 }
 
 function normalizeApiLead(lead) {
@@ -148,7 +174,8 @@ function kitPanel(lead) {
 async function kitAction(id, action) {
   const lead = leadById(id);
   if (!lead) return;
-  const button = document.querySelector(`[data-${action === 'generate' ? 'generate-report' : action === 'autosend' ? 'autosend-kit' : 'mark-kit-sent'}][data-lead-id="${CSS.escape(id)}"]`);
+  const attribute = action === 'generate' ? 'data-generate-report' : action === 'autosend' ? 'data-autosend-kit' : 'data-mark-kit-sent';
+  const button = [...document.querySelectorAll(`[${attribute}]`)].find((candidate) => candidate.dataset.leadId === id);
   if (button) {
     button.disabled = true;
     button.classList.add('is-loading');
@@ -156,13 +183,10 @@ async function kitAction(id, action) {
     button.textContent = action === 'generate' ? 'Generating…' : action === 'autosend' ? 'Sending…' : 'Saving…';
   }
   try {
-    const response = await fetch(`/api/kit-${action === 'generate' ? 'generate' : action === 'autosend' ? 'autosend' : 'sent'}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ workspace: state.workspace, phone: lead.phone }),
-    });
-    const result = await response.json();
-    if (!response.ok || !result.ok) throw new Error(result.message || 'Kit action failed.');
+    const result = await postJson(
+      `/api/kit-${action === 'generate' ? 'generate' : action === 'autosend' ? 'autosend' : 'sent'}`,
+      { workspace: state.workspace, phone: lead.phone },
+    );
     state.leads = state.leads.map((item) => item.id === id ? { ...item, kit: result.kit || item.kit } : item);
     renderDrawer();
     showToast(result.message || 'Kit updated');
@@ -526,7 +550,7 @@ function syncRoute() {
   if (state.selectedLeadId) document.body.classList.add('drawer-open');
 }
 
-function updateLeadStatus(id, status, followup = undefined) {
+async function updateLeadStatus(id, status, followup = undefined) {
   const lead = leadById(id);
   if (!lead || !LEAD_STATUSES.includes(status)) return;
   const oldStatus = lead.status;
@@ -534,20 +558,50 @@ function updateLeadStatus(id, status, followup = undefined) {
   if (oldStatus !== status) {
     state.leads = addLeadNote(state.leads, id, `Status moved from ${oldStatus} to ${status}.`, 'status');
   }
-  saveState();
   renderContent();
   renderDrawer();
   showToast(oldStatus === status ? 'Lead saved' : `${lead.name} moved to ${STATUS_META[status]?.label || status}`);
+  if (apiMode) {
+    try {
+      await postJson('/api/update', {
+        workspace: state.workspace,
+        phone: lead.phone,
+        status,
+        followup: followup === undefined ? lead.followup || '' : followup,
+      });
+    } catch (error) {
+      await hydrateFromApi(state.workspace);
+      renderLayout();
+      showToast(error.message || 'The local database could not save this update.', 'danger');
+    }
+  } else {
+    saveState();
+  }
 }
 
-function updateLeadFollowup(id, followup) {
+async function updateLeadFollowup(id, followup) {
   const lead = leadById(id);
   if (!lead) return;
   state.leads = updateLead(state.leads, id, { followup });
-  saveState();
   renderContent();
   renderDrawer();
   showToast(followup ? `Follow-up set for ${formatDate(followup)}` : 'Follow-up cleared');
+  if (apiMode) {
+    try {
+      await postJson('/api/update', {
+        workspace: state.workspace,
+        phone: lead.phone,
+        status: lead.status,
+        followup,
+      });
+    } catch (error) {
+      await hydrateFromApi(state.workspace);
+      renderLayout();
+      showToast(error.message || 'The local database could not save this follow-up.', 'danger');
+    }
+  } else {
+    saveState();
+  }
 }
 
 function applyShortcut(shortcut) {

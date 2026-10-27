@@ -1,9 +1,9 @@
 {
-  "version": "2.2.1",
+  "version": "2.2.2",
   "files": [
     {
       "path": "vaani_crm.py",
-      "sha256": "57b84a7852949b8656124b5e8e45267d3b206657a5ad289e9200951601618229"
+      "sha256": "f9b14c742f8677af1bd08bf3eab1bda6f7e77ba488c675a99d5de638289a45a3"
     },
     {
       "path": "vaani_crm_legacy.py",
@@ -47,7 +47,7 @@
     },
     {
       "path": "vaani_ui/src/main.js",
-      "sha256": "571ce6c9822f717347a537fc43a10e086570d62b26d4375fee330a99634599fe"
+      "sha256": "c595efdf46f49ec182776bfc69d0535aea522229f3d925431b8653934a0d7b0e"
     },
     {
       "path": "vaani_ui/src/core.js",

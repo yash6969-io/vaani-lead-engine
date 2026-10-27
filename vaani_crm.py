@@ -33,7 +33,7 @@ legacy = None
 
 HERE = Path(__file__).resolve().parent
 UI_ROOT = HERE / "vaani_ui"
-VERSION = "2.2.1"
+VERSION = "2.2.2"
 UPDATE_MANIFEST_URL = (
     "https://raw.githubusercontent.com/yash6969-io/"
     "vaani-lead-engine/main/update-manifest.json"
@@ -557,6 +557,32 @@ def sync_client_state(conn, payload):
     return changed
 
 
+def update_workspace_lead(record, phone, status=None, followup=None):
+    """Apply one status/follow-up change directly to the selected database."""
+    _load_legacy()
+    if not _configure_legacy_for_workspace(record):
+        return False, "This workspace is not configured for CRM status updates."
+    conn = workspace_conn(record)
+    try:
+        normalized = _phone_key(phone)
+        lead = _find_workspace_lead(conn, normalized)
+        if not lead:
+            return False, "Lead not found in this workspace. Refresh the CRM and try again."
+        current_status = lead["status"] or "Not called"
+        next_status = status if status is not None else current_status
+        next_followup = followup if followup is not None else (lead["followup"] or "")
+        if next_status not in legacy.STATUSES:
+            return False, f"Unsupported status: {next_status}"
+        if not legacy.set_status(conn, normalized, next_status, next_followup):
+            return False, "The local database rejected this status update."
+        return True, "Lead updated successfully."
+    except sqlite3.Error as exc:
+        conn.rollback()
+        return False, f"SQLite could not save this update: {exc}"
+    finally:
+        conn.close()
+
+
 class VaaniHandler(BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass
@@ -648,6 +674,26 @@ class VaaniHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         parsed = urllib.parse.urlparse(self.path)
+        if parsed.path == "/api/update":
+            try:
+                length = int(self.headers.get("Content-Length", 0) or 0)
+                raw = self.rfile.read(length).decode("utf-8")
+                if self.headers.get("Content-Type", "").startswith("application/json"):
+                    payload = json.loads(raw or "{}")
+                else:
+                    payload = {key: values[0] for key, values in
+                               urllib.parse.parse_qs(raw).items()}
+                record = resolve_workspace(payload.get("workspace"))
+                ok, message = update_workspace_lead(
+                    record, payload.get("phone", ""),
+                    payload.get("status"), payload.get("followup"),
+                )
+                self._send(200, json.dumps({"ok": ok, "message": message}),
+                           "application/json; charset=utf-8")
+            except Exception as exc:
+                self._send(400, json.dumps({"ok": False, "message": str(exc)}),
+                           "application/json; charset=utf-8")
+            return
         if parsed.path in ("/api/kit-generate", "/api/kit-autosend", "/api/kit-sent"):
             try:
                 length = int(self.headers.get("Content-Length", 0) or 0)
