@@ -33,7 +33,7 @@ legacy = None
 
 HERE = Path(__file__).resolve().parent
 UI_ROOT = HERE / "vaani_ui"
-VERSION = "2.2.2"
+VERSION = "2.3.0"
 UPDATE_MANIFEST_URL = (
     "https://raw.githubusercontent.com/yash6969-io/"
     "vaani-lead-engine/main/update-manifest.json"

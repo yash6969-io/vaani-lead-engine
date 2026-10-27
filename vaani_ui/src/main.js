@@ -489,6 +489,7 @@ function emptyState(title, body, actionLabel = '', action = '') {
 function renderDrawer() {
   const drawer = document.querySelector('#lead-drawer');
   if (!drawer) return;
+  const previousScrollTop = drawer.querySelector('.drawer-content')?.scrollTop || 0;
   const lead = state.selectedLeadId ? leadById(state.selectedLeadId) : null;
   if (!lead) {
     drawer.className = 'lead-drawer';
@@ -500,6 +501,12 @@ function renderDrawer() {
   drawer.className = 'lead-drawer is-open';
   drawer.setAttribute('aria-hidden', 'false');
   drawer.innerHTML = `<div class="drawer-scrim" data-close-drawer></div><div class="drawer-panel"><div class="drawer-header"><div><span class="drawer-kicker">Lead workspace</span><span class="drawer-source">${escapeHtml(lead.source || 'Manual entry')}</span></div><button class="icon-button" data-close-drawer aria-label="Close lead drawer">${icon('close', 19)}</button></div><div class="drawer-content"><div class="drawer-lead-heading">${initialsAvatar(lead.name, 'avatar--large')}<div><h2>${escapeHtml(lead.name)}</h2><p>${escapeHtml(lead.location)}</p><div class="drawer-tags">${tierBadge(lead.tier)} ${scoreBadge(lead.score)} ${statusPill(lead.status)}</div></div></div><div class="drawer-actions"><a class="button button--primary" href="tel:${phoneDigits(lead.phone)}">${icon('phone', 16)} Call</a><a class="button button--secondary" href="https://wa.me/91${phoneDigits(lead.phone)}" target="_blank" rel="noreferrer">WhatsApp</a></div><div class="drawer-section drawer-section--details"><div class="drawer-section__heading"><h3>Contact details</h3><span class="muted">Scanned signals</span></div><div class="contact-grid"><div><span>Contact</span><strong>${escapeHtml(lead.contact || 'Unknown')}</strong></div><div><span>Mobile</span><strong>${escapeHtml(lead.phone)}</strong></div><div><span>Email</span><strong>${lead.email ? `<a href="mailto:${escapeHtml(lead.email)}">${escapeHtml(lead.email)}</a>` : '<em>Not found</em>'}</strong></div><div><span>Website</span><strong>${lead.website ? `<a href="${escapeHtml(websiteHref(lead.website))}" target="_blank" rel="noreferrer">${escapeHtml(lead.website)} ${icon('external', 12)}</a>` : '<em>Not found</em>'}</strong></div></div></div><div class="drawer-section drawer-section--next"><div class="drawer-section__heading"><h3>Next step</h3><span class="muted">Update saves instantly</span></div><div class="drawer-form-row"><label>Status<select data-drawer-status data-lead-id="${escapeHtml(lead.id)}">${statusSelectOptions(lead.status, false)}</select></label><label>Follow-up<input type="date" data-drawer-followup data-lead-id="${escapeHtml(lead.id)}" value="${escapeHtml(lead.followup || '')}"></label></div><div class="quick-dates"><button class="text-button" data-set-followup="1" data-lead-id="${escapeHtml(lead.id)}">Tomorrow</button><button class="text-button" data-set-followup="3" data-lead-id="${escapeHtml(lead.id)}">+3 days</button><button class="text-button" data-set-followup="7" data-lead-id="${escapeHtml(lead.id)}">Next week</button><button class="text-button text-button--muted" data-clear-followup data-lead-id="${escapeHtml(lead.id)}">Clear date</button></div></div><div class="drawer-section"><div class="drawer-section__heading"><h3>Why this lead</h3><span class="muted">Score evidence</span></div><div class="signal-list">${(lead.signals || []).map((signal) => `<span>${icon('check', 13)}${escapeHtml(signal)}</span>`).join('')}</div><p class="angle-callout"><strong>Pitch angle:</strong> ${escapeHtml(lead.angle || 'New opportunity')}</p></div>${kitPanel(lead)}<div class="drawer-section drawer-section--notes"><div class="drawer-section__heading"><h3>Notes & activity</h3><span class="muted">${notes.length} ${notes.length === 1 ? 'entry' : 'entries'}</span></div><form data-note-form data-lead-id="${escapeHtml(lead.id)}"><textarea name="note" rows="3" placeholder="What happened? Add context for the next call…"></textarea><div class="note-form__footer"><span>Private to this workspace</span><button class="button button--secondary" type="submit">Add note ${icon('arrow', 14)}</button></div></form><div class="timeline">${notes.length ? notes.map((note) => `<div class="timeline-item"><span class="timeline-marker ${note.source === 'status' ? 'timeline-marker--status' : ''}">${icon(note.source === 'status' ? 'check' : 'note', 12)}</span><div><strong>${escapeHtml(note.text)}</strong><small>${formatDateTime(note.createdAt)} · ${escapeHtml(note.source === 'status' ? 'Pipeline update' : 'Note')}</small></div></div>`).join('') : '<div class="timeline-empty">No notes yet. Add the context you will want on the next call.</div>'}</div></div></div></div>`;
+  if (previousScrollTop > 0) {
+    window.requestAnimationFrame(() => {
+      const content = drawer.querySelector('.drawer-content');
+      if (content) content.scrollTop = previousScrollTop;
+    });
+  }
 }
 
 function openLead(id) {
@@ -1000,9 +1007,17 @@ async function init() {
       if (workspaceSwitching) return;
       try {
         const before = (state.workspaces || []).map((workspace) => workspace.label).join('|');
+        const selectedLeadId = state.selectedLeadId;
+        const drawerScrollTop = document.querySelector('.drawer-content')?.scrollTop || 0;
         await hydrateFromApi(state.workspace);
         const after = (state.workspaces || []).map((workspace) => workspace.label).join('|');
         renderLayout();
+        if (selectedLeadId && drawerScrollTop > 0) {
+          window.requestAnimationFrame(() => {
+            const content = document.querySelector('.drawer-content');
+            if (content) content.scrollTop = drawerScrollTop;
+          });
+        }
         if (before !== after) showToast('A new CRM workspace is ready to use.');
       } catch {
         // Keep the current local view if the scraper is still running.

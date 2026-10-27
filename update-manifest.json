@@ -1,9 +1,9 @@
 {
-  "version": "2.2.2",
+  "version": "2.3.0",
   "files": [
     {
       "path": "vaani_crm.py",
-      "sha256": "f9b14c742f8677af1bd08bf3eab1bda6f7e77ba488c675a99d5de638289a45a3"
+      "sha256": "cec4107d90ae26421a9542aed289e8b4147e880eb1a51956839aadffc9d73250"
     },
     {
       "path": "vaani_crm_legacy.py",
@@ -19,7 +19,7 @@
     },
     {
       "path": "clinic_report.py",
-      "sha256": "f4025fda3898d3898c9629204e9d32df7e4e39c1a3235bd0a46712aa38a47c69"
+      "sha256": "8d7074e7ac9296a0fc885622a493f63c570790629cac09274abbb71d1f8d1105"
     },
     {
       "path": "kit_send.py",
@@ -47,7 +47,7 @@
     },
     {
       "path": "vaani_ui/src/main.js",
-      "sha256": "c595efdf46f49ec182776bfc69d0535aea522229f3d925431b8653934a0d7b0e"
+      "sha256": "c9ebf048897ad969461c09e7ff8f75b0560c59c18d3ed0109f2b63cf1c1a3690"
     },
     {
       "path": "vaani_ui/src/core.js",
@@ -63,7 +63,7 @@
     },
     {
       "path": "CLINIC-README.md",
-      "sha256": "1a592a24ed0007f7f331034c787e6884c4e53b2048da86fd4596786a3cd36320"
+      "sha256": "4d2b34477d7341109a9abfe9bcfcefb97b62160013ea5af00a93d8c3c5301c0a"
     }
   ]
 }

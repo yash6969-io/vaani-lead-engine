@@ -32,11 +32,9 @@ Needs a healthcare scrape first:
 
 - The clinic's Google rating, reviews, and rank in its area —
   every number from the scrape, nothing invented.
-- **What's costing you**: content pains only — no website, no
-  social page linked from the website (checked live when the
-  card is made, and only claimed when the check succeeded),
-  proof sitting unused, a rival showing up first, a rating
-  below the area average.
+- **Content opportunities**: your existing patient proof, rating,
+  area position and visibility gaps translated into social-content
+  opportunities. The report does not evaluate or sell websites.
 - What Content365 makes (365 posts, ₹3,999 incl. GST for the
   year) and the free first-week offer.
 

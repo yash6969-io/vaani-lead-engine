@@ -14,9 +14,8 @@ start (silent when offline or up to date; --no-update skips it).
 For each clinic it writes clinic-reports/<phone>-<name>.png
 (WhatsApp-ready), .pdf and .html next to this script. Every number
 on the card comes from the lead database - the clinic's own
-scraped Google data, never invented. Social presence is checked
-live on the clinic's own website at generation time and only
-reported when that check actually succeeded.
+scraped Google data, never invented. The report is focused on the
+social content, captions and publishing rhythm Content365 provides.
 
 The pitch is content: patients find a clinic on Google, then check
 it before booking. A strong listing with silence behind it leaks
@@ -36,7 +35,7 @@ import urllib.request
 from datetime import date
 
 # ------------------------------------------------------------------ config
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 UPDATE_URL = ("https://raw.githubusercontent.com/yash6969-io/"
               "vaani-lead-engine/main/clinic_report.py")
 SELLER_NAME = "Yash Tanna"
@@ -112,13 +111,8 @@ CLINIC_CHAINS = ("apollo", "fortis", "manipal", "medanta",
                  "dr lal", "metropolis diagnostics", "kims hospital",
                  "yashoda", "care hospitals", "aster", "wockhardt")
 
-def verdict(lead, site):
-    """Should this clinic be pitched at all? (decision, reason).
-    Chains and hospital groups decide marketing centrally;
-    suppressed leads must not be contacted; and a clinic whose own
-    website already links its social pages, on top of a strong
-    rating and review base, is the weakest fit for a content pitch -
-    skip it and save the calling time."""
+def verdict(lead, site=None):
+    """Choose Content365 prospects without evaluating website ownership."""
     name_low = (lead["name"] or "").lower()
     if any(c in name_low for c in CLINIC_CHAINS):
         return ("skip", "chain / hospital group - marketing is "
@@ -126,11 +120,6 @@ def verdict(lead, site):
     if lead["suppressed"]:
         return ("skip", "marked Do not contact / Not interested / "
                 "Wrong number")
-    if (site["state"] == "checked" and site["socials"]
-            and (lead["rating"] or 0) >= 4.2
-            and (lead["reviews"] or 0) >= 200):
-        return ("skip", "already set up online - website, linked "
-                "socials and a strong review base; weakest fit")
     return ("pitch", "")
 
 
@@ -177,53 +166,30 @@ _SITE_CACHE = {}
 
 
 def fetch_site(lead):
-    """What the clinic's own website shows: does it link to any
-    social page? Checked live, once per website per run, and only
-    ever reported when the fetch actually succeeded - a site that
-    cannot be reached proves nothing and stays 'unreachable'."""
-    url = (lead["website"] or "").strip()
-    if not url:
-        return {"state": "no-website", "socials": []}
-    if url in _SITE_CACHE:
-        return _SITE_CACHE[url]
-    info = {"state": "unreachable", "socials": []}
-    try:
-        full = url if "://" in url else "https://" + url
-        req = urllib.request.Request(
-            full, headers={"User-Agent": "Mozilla/5.0 VaaniClinic"})
-        with urllib.request.urlopen(req, timeout=7) as r:
-            body = r.read(400000).decode("utf-8", "replace").lower()
-        found = []
-        for name_p, needle in (("Instagram", "instagram.com/"),
-                               ("Facebook", "facebook.com/"),
-                               ("YouTube", "youtube.com/"),
-                               ("LinkedIn", "linkedin.com/")):
-            if needle in body:
-                found.append(name_p)
-        info = {"state": "checked", "socials": found}
-    except Exception:
-        pass
-    _SITE_CACHE[url] = info
-    return info
+    """Compatibility placeholder for older callers; no site is scanned."""
+    return {"state": "not-checked", "socials": []}
 
 
 def gaps_and_wins(lead, peers, st, site):
     gaps, wins = [], []
     reviews = lead["reviews"] or 0
     rating = lead["rating"]
-    # --- presence pains: what a checking patient finds (or not) ---
-    if not (lead["website"] or "").strip():
-        gaps.append(("No website of your own",
-                     "A patient who wants to check your treatments, "
-                     "timings or doctors finds only the Google "
-                     "listing - nothing that carries your name and "
-                     "explains your clinic."))
-    elif site["state"] == "checked" and not site["socials"]:
-        gaps.append(("No social page linked anywhere",
-                     "Your website links to no Instagram or "
-                     "Facebook page. A patient who wants to see "
-                     "your clinic before booking - the most common "
-                     "check there is - finds nothing to see."))
+    # --- content opportunities: what Content365 can create and publish ---
+    if reviews >= 150:
+        gaps.append(("Your patient trust is not yet a content library",
+                     f"You already have {reviews:,} public patient reviews. "
+                     "Those real trust signals can become a steady stream "
+                     "of educational, reassuring and awareness-day posts."))
+    elif reviews > 0:
+        gaps.append(("Your content foundation is still small",
+                     f"Your {reviews:,} public reviews are a useful start. "
+                     "A consistent series of helpful posts can keep your "
+                     "clinic visible between patient searches."))
+    else:
+        gaps.append(("Your social content story has not started yet",
+                     "Without a regular stream of useful health content, "
+                     "patients have fewer reminders of what your clinic "
+                     "does and why they should trust it."))
     top = st["top"]
     if (top is not None and top["phone"] != lead["phone"]
             and (top["reviews"] or 0) > 2 * max(1, reviews)):
@@ -240,23 +206,6 @@ def gaps_and_wins(lead, peers, st, site):
                      "stars. Patients read that gap as the area's "
                      "verdict - it costs you first visits "
                      "every week."))
-    # --- pains every clinic has, leader or not ---
-    if reviews >= 150:
-        gaps.append(("Your proof is sitting unused",
-                     f"{reviews:,} patients have reviewed you on "
-                     "Google - but that trust lives only on Google. "
-                     "None of it appears where your next patient "
-                     "scrolls every day."))
-    elif reviews > 0 and reviews < 50:
-        gaps.append(("Too little proof for a first visit",
-                     f"Only {reviews} Google reviews - a "
-                     "first-time patient choosing between clinics "
-                     "usually picks the name with more proof "
-                     "behind it."))
-    elif reviews == 0:
-        gaps.append(("Almost invisible on Google",
-                     "No reviews yet - a patient searching your "
-                     "area will almost never find you."))
     if st["rank"] == 1 and peers:
         second = sorted(peers, key=lambda r: -(r["reviews"] or 0))[0]
         diff = reviews - (second["reviews"] or 0)
@@ -273,12 +222,11 @@ def gaps_and_wins(lead, peers, st, site):
                      "sitting in public, where every new patient "
                      "reads them first."))
     if not gaps:
-        gaps.append(("Nothing reminds patients you exist",
-                     "Your listing answers when someone searches. "
-                     "But between searches your clinic is silent - "
-                     "no health tips, no awareness days, no "
-                     "presence at all. The clinics patients "
-                     "remember are the ones they keep seeing."))
+        gaps.append(("No consistent content rhythm",
+                     "Patients remember clinics they keep seeing. "
+                     "Health tips, awareness days, seasonal guidance "
+                     "and simple clinic stories give Content365 a "
+                     "clear rhythm to build for you."))
     # --- wins, capped at two: praise opens the door, pain sells ---
     if rating and rating >= 4.3:
         wins.append(("Strong rating",
@@ -294,18 +242,17 @@ def gaps_and_wins(lead, peers, st, site):
                      "You are one of the names your area already "
                      "knows."))
     if reviews >= 500:
-        wins.append(("A deep base of patient trust",
-                     f"{reviews:,} reviews is proof most clinics "
-                     "never build."))
-    if (lead["website"] or "").strip():
-        wins.append(("You have a website",
-                     "Most clinics in your area don't - it is a "
-                     "real home for your name online."))
-    if site["state"] == "checked" and site["socials"]:
-        wins.append(("Your social pages are linked",
-                     "A patient can actually reach your "
-                     + " and ".join(site["socials"])
-                     + " - many clinics cannot say that."))
+        wins.append(("A deep bank of patient trust",
+                     f"{reviews:,} reviews give Content365 strong real-world "
+                     "proof to turn into reassuring and educational posts."))
+    elif reviews >= 50:
+        wins.append(("Enough proof for a strong content series",
+                     f"Your {reviews:,} reviews provide real themes and "
+                     "patient trust for a useful recurring post plan."))
+    if rating and rating >= 4.5:
+        wins.append(("A reputation worth showing consistently",
+                     "Your rating gives every educational and awareness "
+                     "post a credible clinic story behind it."))
     return gaps[:3], wins[:2]
 
 
@@ -479,7 +426,7 @@ def build_html(lead, peers, st, site):
         return out
     wins_html = (f'<div class="sec"><h2>What\'s working</h2>'
                  f'{items(wins, "win", CHECK)}</div>') if wins else ""
-    gaps_html = (f'<div class="sec"><h2>What\'s costing you</h2>'
+    gaps_html = (f'<div class="sec"><h2>Content opportunities</h2>'
                  f'{items(gaps, "gap", ALERT)}</div>') if gaps else ""
     panel_rows = ""
     for t in (
@@ -501,18 +448,16 @@ def build_html(lead, peers, st, site):
              f'full year is &#8377;3,999 including GST. See '
              f'posts made for clinics like yours: '
              f'content365.si/industries</div></div>')
-    site_note = (" - and your website, checked today"
-                 if site["state"] == "checked" else "")
     phone_line = (f' &middot; WhatsApp {esc(SELLER_PHONE)}'
                   if SELLER_PHONE else "")
     site_line = (f'<br>{esc(C365_WEBSITE)}' if C365_WEBSITE else "")
     return f"""<!DOCTYPE html><html><head><meta charset="utf-8">
 <style>{CSS}</style></head><body><div class="card">
-<div class="head"><div class="kicker">Content &amp; Trust Report</div>
+<div class="head"><div class="kicker">Content365 Social Content Report</div>
 <h1>{esc(lead['name'])}</h1>
 <div class="addr">{esc(lead['address'])}</div>
-<div class="meta">Prepared on {today} &middot; Based on your public
-Google listing</div></div>
+<div class="meta">Prepared on {today} &middot; Built from your public
+Google reputation to plan better social content</div></div>
 {stats}
 {compare}
 {wins_html}
@@ -525,8 +470,9 @@ yourself.</span></div>
 <div class="brand"><div class="bname">{esc(BRAND)}</div>
 <div class="who2">{esc(SELLER_NAME)}{phone_line}{site_line}</div></div></div>
 <div class="fine">This report uses only your public Google listing data
-and the {st['n']} clinics tracked in your area{site_note} - nothing
-here is estimated or invented.</div>
+and the {st['n']} clinics tracked in your area - nothing here is estimated
+or invented. Content365 turns the opportunity into branded social posts,
+captions and a publishing calendar for your approval.</div>
 </div></body></html>"""
 
 
@@ -564,7 +510,7 @@ def slug(name):
 def make_card(conn, lead):
     peers = find_peers(conn, lead)
     st = area_stats(lead, peers)
-    site = fetch_site(lead)
+    site = {"state": "not-checked", "socials": []}
     html_text = build_html(lead, peers, st, site)
     os.makedirs(OUT_DIR, exist_ok=True)
     base = os.path.join(OUT_DIR, f"{lead['phone']}-{slug(lead['name'])}")
@@ -609,7 +555,7 @@ def main():
     if not force:
         keep = []
         for lead in leads:
-            decision, reason = verdict(lead, fetch_site(lead))
+            decision, reason = verdict(lead)
             if decision == "skip":
                 skipped.append((lead, reason))
             else:
