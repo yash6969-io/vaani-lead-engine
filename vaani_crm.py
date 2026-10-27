@@ -23,14 +23,17 @@ import urllib.request
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
-from http.server import ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-import vaani_crm_legacy as legacy
+# Loaded after the updater has had a chance to restore missing companion
+# files. Older installations can therefore recover instead of failing at
+# module import with ModuleNotFoundError.
+legacy = None
 
 
 HERE = Path(__file__).resolve().parent
 UI_ROOT = HERE / "vaani_ui"
-VERSION = "2.2.0"
+VERSION = "2.2.1"
 UPDATE_MANIFEST_URL = (
     "https://raw.githubusercontent.com/yash6969-io/"
     "vaani-lead-engine/main/update-manifest.json"
@@ -59,6 +62,14 @@ UPDATE_ALLOWLIST = {
 }
 
 CRM_PORTS = (8765, 8766, 8767, 8768, 8769)
+
+
+def _load_legacy():
+    global legacy
+    if legacy is None:
+        import importlib
+        legacy = importlib.import_module("vaani_crm_legacy")
+    return legacy
 
 
 def _workspace_label_from_slug(slug):
@@ -142,12 +153,14 @@ def workspace_conn(record):
 
 
 def workspace_rows(conn):
+    _load_legacy()
     return conn.execute(legacy.LEAD_SELECT +
                         " ORDER BY (l.score IS NULL), l.score DESC, l.reviews DESC").fetchall()
 
 
 def _configure_legacy_for_workspace(record):
     """Point the legacy report/kit helpers at one selected workspace."""
+    _load_legacy()
     key = record["key"]
     if key not in ("restaurants", "healthcare"):
         return False
@@ -282,10 +295,16 @@ def self_update():
     try:
         manifest = json.loads(_read_url(UPDATE_MANIFEST_URL).decode("utf-8"))
         remote_version = str(manifest.get("version", "0.0.0"))
-        if _version_tuple(remote_version) <= _version_tuple(VERSION):
-            return
         files = manifest.get("files", [])
         if not isinstance(files, list) or not files:
+            return
+        missing_files = any(
+            (_safe_target(item.get("path", "")) is not None and
+             not _safe_target(item.get("path", "")).exists())
+            for item in files if isinstance(item, dict)
+        )
+        if (_version_tuple(remote_version) <= _version_tuple(VERSION)
+                and not missing_files):
             return
     except Exception:
         return
@@ -470,6 +489,7 @@ def export_workspace_csv(record):
 
 
 def sync_client_state(conn, payload):
+    _load_legacy()
     leads = payload.get("leads") if isinstance(payload, dict) else None
     if not isinstance(leads, list):
         return 0
@@ -537,7 +557,20 @@ def sync_client_state(conn, payload):
     return changed
 
 
-class VaaniHandler(legacy.Handler):
+class VaaniHandler(BaseHTTPRequestHandler):
+    def log_message(self, *args):
+        pass
+
+    def _send(self, code, body, ctype="text/html; charset=utf-8", extra=None):
+        data = body.encode("utf-8") if isinstance(body, str) else body
+        self.send_response(code)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(data)))
+        for key, value in (extra or {}).items():
+            self.send_header(key, value)
+        self.end_headers()
+        self.wfile.write(data)
+
     def _serve_ui(self, relative_path):
         relative_path = relative_path.replace("\\", "/").lstrip("/")
         if relative_path in ("", "index.html"):
@@ -611,7 +644,7 @@ class VaaniHandler(legacy.Handler):
             else:
                 self._send(404, "Brochure not found.")
             return
-        legacy.Handler.do_GET(self)
+        self._send(404, "Not found")
 
     def do_POST(self):
         parsed = urllib.parse.urlparse(self.path)
@@ -656,11 +689,17 @@ class VaaniHandler(legacy.Handler):
             except Exception as exc:
                 self._send(400, json.dumps({"ok": False, "error": str(exc)}), "application/json; charset=utf-8")
             return
-        legacy.Handler.do_POST(self)
+        self._send(404, "Not found")
 
 
 def main():
     self_update()
+    try:
+        _load_legacy()
+    except ModuleNotFoundError as exc:
+        print(f"  CRM startup file is missing: {exc.name}.")
+        print("  Run this launcher once with internet access so the updater can restore it.")
+        return
     server = None
     for port in CRM_PORTS:
         try:
