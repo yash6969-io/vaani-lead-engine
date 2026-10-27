@@ -1,9 +1,9 @@
 {
-  "version": "2.3.0",
+  "version": "2.3.1",
   "files": [
     {
       "path": "vaani_crm.py",
-      "sha256": "cec4107d90ae26421a9542aed289e8b4147e880eb1a51956839aadffc9d73250"
+      "sha256": "92427bc124d46941da77860dafb11882d9d96923c6f23501350e7c5e7e0ed41b"
     },
     {
       "path": "vaani_crm_legacy.py",

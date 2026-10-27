@@ -33,7 +33,7 @@ legacy = None
 
 HERE = Path(__file__).resolve().parent
 UI_ROOT = HERE / "vaani_ui"
-VERSION = "2.3.0"
+VERSION = "2.3.1"
 UPDATE_MANIFEST_URL = (
     "https://raw.githubusercontent.com/yash6969-io/"
     "vaani-lead-engine/main/update-manifest.json"
@@ -298,13 +298,20 @@ def self_update():
         files = manifest.get("files", [])
         if not isinstance(files, list) or not files:
             return
-        missing_files = any(
-            (_safe_target(item.get("path", "")) is not None and
-             not _safe_target(item.get("path", "")).exists())
-            for item in files if isinstance(item, dict)
-        )
+        files_need_refresh = False
+        for item in files:
+            if not isinstance(item, dict):
+                continue
+            target = _safe_target(item.get("path", ""))
+            if target is None or not target.exists():
+                files_need_refresh = True
+                break
+            expected_hash = item.get("sha256")
+            if expected_hash and hashlib.sha256(target.read_bytes()).hexdigest().lower() != str(expected_hash).lower():
+                files_need_refresh = True
+                break
         if (_version_tuple(remote_version) <= _version_tuple(VERSION)
-                and not missing_files):
+                and not files_need_refresh):
             return
     except Exception:
         return
