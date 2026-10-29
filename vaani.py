@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Vaani Lead Engine v3.12
+Vaani Lead Engine v3.13
 ======================
 Type a location (even a small area like "Gota, Ahmedabad") and get 4 lead
 databases about restaurants there:
@@ -35,7 +35,7 @@ import sqlite3
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
-VERSION = "3.12.0"
+VERSION = "3.13.0"
 UPDATE_URL = ("https://raw.githubusercontent.com/yash6969-io/"
               "vaani-lead-engine/main/vaani.py")
 
@@ -583,6 +583,222 @@ def fetch_emails(website):
     return fetch_site_info(website)["emails"]
 
 
+# ---------------------------------------------------------------- TPO mode
+# --vertical tpo: Training & Placement CELL numbers only.
+# The rule is strict and absolute, by the user's instruction:
+#   * a number is saved ONLY if it is presented as the TPO CELL's
+#     own contact (a placement-page block labelled as the cell or
+#     its office, with no person's name attached);
+#   * the college's main number from Google Maps is NEVER a TPO
+#     number and is never saved in a TPO run;
+#   * any other staff member's number found anywhere is DELETED -
+#     it is not stored in any output (database, Excel, tracker,
+#     or CSV). When in doubt, the number is dropped.
+# A college with no qualifying TPO cell number is not a lead at all
+# and is left out of every file, exactly like the no-mobile rule
+# for restaurants. TPO office landlines ARE kept (a cell's published
+# number is often a landline) and are tagged as landline, because
+# dropping them would delete most real TPO cells; mobiles are
+# preferred when a page lists both.
+TPO_PAGE_HINTS = ("placement", "tpo", "training-and-placement",
+                  "training & placement", "training and placement",
+                  "placement-cell", "placementcell", "career")
+TPO_CELL_RE = re.compile(
+    r"placement\s*cell|training\s*(?:and|&)\s*placement\s*cell|"
+    r"tpo\s*cell|placement\s*office|tpo\s*office|"
+    r"placement\s*department|training\s*(?:and|&)\s*placement",
+    re.I)
+TPO_PERSON_RE = re.compile(
+    r"(Dr\.|Mr\.|Ms\.|Mrs\.|Prof\.|Er\.)\s*[A-Z]|"
+    r"(?:Placement Officer|Training and Placement Officer|TPO|"
+    r"Coordinator|Head|Contact Person)\s*[:\-–—]\s*"
+    r"(?!Cell\b|Office\b|Department\b)[A-Z][a-z]+")
+TPO_GENERIC_EMAILS = ("tpo", "placement", "placements", "placementcell",
+                      "tpocell", "training", "trainingplacement",
+                      "careers", "career", "placementoffice", "tpooffice")
+TPO_MOBILE_RE = re.compile(r"(?:\+?91[\s\-]?|0)?([6-9]\d{4}[\s\-]?\d{5})")
+
+
+def _tpo_landline(raw):
+    """Return the full landline digits (with trunk 0), or None."""
+    digits = re.sub(r"\D", "", str(raw))
+    if len(digits) in (10, 11) and digits.startswith("0"):
+        body = digits[1:]
+        for ln in (4, 3, 2):
+            if body[:ln] in STD_CODES:
+                sub = body[ln:]
+                if sub and sub[0] in "2345" and len(sub) >= 6:
+                    return digits
+    return None
+
+
+def _tpo_block_numbers(block, context=None):
+    """Qualifying numbers in one text block. The block qualifies only
+    when its context names the cell/office AND names no person. The
+    context is the block plus the two lines above it, because real
+    pages put the label on one line and the number on the next:
+        Training and Placement Cell
+        Phone: 98765 43210
+    Candidates still come from the block itself only, so a number is
+    never counted twice and never borrows a neighbour's digits."""
+    context = block if context is None else context
+    if not TPO_CELL_RE.search(context):
+        return []
+    if TPO_PERSON_RE.search(context):
+        return []
+    out = []
+    for m in TPO_MOBILE_RE.finditer(block):
+        mob = clean_phone(m.group(0))
+        if mob and (mob, "mobile") not in out:
+            out.append((mob, "mobile"))
+    # Landlines are written with separators in every position
+    # ("079-2656 1234"), so take loose 0-led candidates and let the
+    # STD + subscriber validation decide, instead of a rigid shape.
+    for m in re.finditer(r"0[\d\s\-]{7,14}\d", block):
+        land = _tpo_landline(m.group(0))
+        if land and (land, "landline") not in out:
+            out.append((land, "landline"))
+    return out
+
+
+def _tpo_text_blocks(html):
+    """Page HTML -> plain-text blocks (one per line), scripts and
+    styles stripped, so a number is always judged with its own
+    surrounding label and never with a neighbour's."""
+    text = re.sub(r"(?i)<script.*?</script>", " ", html, flags=re.S)
+    text = re.sub(r"(?i)<style.*?</style>", " ", text, flags=re.S)
+    text = re.sub(r"(?i)</(p|div|li|tr|section|article|h\d|footer|"
+                  r"header|span)>", "\n", text)
+    text = re.sub(r"(?i)<br\s*/?>", "\n", text)
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = text.replace("&nbsp;", " ")
+    return [ln.strip() for ln in text.split("\n") if ln.strip()]
+
+
+def extract_tpo_from_html(html):
+    """Pure parser (no network): TPO cell numbers + generic TPO
+    emails found in one page's HTML. Staff numbers are dropped here
+    and never returned, so they cannot leak into any output."""
+    numbers, emails = [], []
+    blocks = _tpo_text_blocks(html)
+    for i, block in enumerate(blocks):
+        window = " ".join(blocks[max(0, i - 2):i + 1])
+        for num, kind in _tpo_block_numbers(block, window):
+            if (num, kind) not in numbers:
+                numbers.append((num, kind))
+    # tel: links whose label names the cell/office (label-only links
+    # carry no usable block text, so the anchor text IS the block)
+    for href, label in re.findall(
+            r'<a\s[^>]*href="tel:([^"]+)"[^>]*>(.*?)</a>',
+            html, flags=re.I | re.S):
+        label_text = re.sub(r"<[^>]+>", " ", label).strip()
+        if TPO_CELL_RE.search(label_text) \
+                and not TPO_PERSON_RE.search(label_text):
+            mob = clean_phone(href)
+            if mob and (mob, "mobile") not in numbers:
+                numbers.append((mob, "mobile"))
+            land = _tpo_landline(href)
+            if land and (land, "landline") not in numbers:
+                numbers.append((land, "landline"))
+    for e in split_emails(html):
+        local = e.split("@")[0]
+        if local in TPO_GENERIC_EMAILS or local.startswith("tpo") \
+                or local.startswith("placement"):
+            if e not in emails:
+                emails.append(e)
+    return numbers, emails
+
+
+def find_tpo_links(homepage_html, base_url):
+    """Same-origin links (href or anchor text) pointing at a
+    placement/TPO page. The homepage itself is always candidate 1:
+    some colleges put the TPO block on the homepage."""
+    found = []
+    for href, label in re.findall(
+            r'<a\s[^>]*href="([^"]+)"[^>]*>(.*?)</a>',
+            homepage_html, flags=re.I | re.S):
+        hl, tl = href.lower(), re.sub(r"<[^>]+>", " ", label).lower()
+        if not any(h in hl or h in tl for h in TPO_PAGE_HINTS):
+            continue
+        url = urllib.parse.urljoin(base_url, href)
+        if urllib.parse.urlparse(url).netloc != \
+                urllib.parse.urlparse(base_url).netloc:
+            continue
+        if url not in found:
+            found.append(url)
+    return found[:4]
+
+
+def _fetch_html(url):
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": BROWSER_UA})
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            return resp.read(300000).decode("utf-8", "replace")
+    except Exception:
+        return ""
+
+
+def fetch_tpo_contact(website):
+    """TPO cell contact for one college website. Returns
+    {phone, phone_kind, emails, source} or all-empty when no
+    qualifying TPO cell number exists. The Maps/main number is
+    never consulted here, so it can never become a TPO number."""
+    result = {"phone": "", "phone_kind": "", "emails": [], "source": ""}
+    if not website or "google." in website:
+        return result
+    home = _fetch_html(website)
+    if not home:
+        return result
+    pages = [website] + find_tpo_links(home, website)
+    mobiles, landline, emails = [], "", []
+    mobile_source, landline_source = "", ""
+    for url in pages:
+        html = home if url == website else _fetch_html(url)
+        if not html:
+            continue
+        numbers, page_emails = extract_tpo_from_html(html)
+        for num, kind in numbers:
+            if kind == "mobile" and num not in mobiles:
+                mobiles.append(num)
+                if not mobile_source:
+                    mobile_source = url
+            elif kind == "landline" and not landline:
+                landline = num
+                if not landline_source:
+                    landline_source = url
+        for e in page_emails:
+            if e not in emails:
+                emails.append(e)
+    if mobiles:
+        result["phone"], result["phone_kind"] = mobiles[0], "mobile"
+        result["source"] = mobile_source
+    elif landline:
+        result["phone"], result["phone_kind"] = landline, "landline"
+        result["source"] = landline_source
+    result["emails"] = emails[:3]
+    return result
+
+
+def tpo_score_lead(r, tpo):
+    """TPO contactability score (starting estimate, NOT the food
+    rubric): a TPO mobile is worth more than a landline because it
+    can also take WhatsApp; a generic TPO email and a website add
+    reach. Bands reuse A>=75 / B 50-74 / C<50 so call order works."""
+    reasons = []
+    score = 60 if tpo["phone_kind"] == "mobile" else 40
+    reasons.append("TPO cell mobile from placement page"
+                   if tpo["phone_kind"] == "mobile"
+                   else "TPO cell landline from placement page")
+    if tpo.get("emails"):
+        score += 20
+        reasons.append("TPO email found")
+    if r.get("website"):
+        score += 20
+        reasons.append("Has website")
+    tier = "A" if score >= 75 else "B" if score >= 50 else "C"
+    return score, tier, reasons, "TPO cell outreach"
+
+
 # ---------------------------------------------------------------- scoring
 # Book My Food Phase 1 rubric (100 points, every point shows its evidence).
 # The bands are starting estimates - they get recalibrated against real
@@ -823,6 +1039,17 @@ VERTICALS = {
         "count_label": "Clinics / hospitals in your database",
         "folder_prefix": "healthcare_",
     },
+    "tpo": {
+        "label": "TPO Cells",
+        "db": "vaani_tpo.db",
+        "tracker": "vaani-tpo-tracker.xlsx",
+        "winback": "vaani-tpo-not-interested.xlsx",
+        "name_header": "College name",
+        "names_file": "college_names.csv",
+        "names_col": "college_name",
+        "count_label": "TPO cells in your database",
+        "folder_prefix": "tpo_",
+    },
 }
 VCFG = VERTICALS["food"]
 WORKSPACE_KEY = "restaurants"
@@ -838,8 +1065,10 @@ def apply_vertical(name):
     global MASTER_DB, TRACKER_NAME, WINBACK_NAME, VCFG
     global WORKSPACE_KEY, WORKSPACE_LABEL
     VCFG = VERTICALS[name]
-    WORKSPACE_KEY = "healthcare" if name == "healthcare" else "restaurants"
-    WORKSPACE_LABEL = "Healthcare" if name == "healthcare" else "Restaurants"
+    WORKSPACE_KEY = {"healthcare": "healthcare",
+                     "tpo": "tpo"}.get(name, "restaurants")
+    WORKSPACE_LABEL = {"healthcare": "Healthcare",
+                       "tpo": "TPO Cells"}.get(name, "Restaurants")
     MASTER_DB = VCFG["db"]
     TRACKER_NAME = VCFG["tracker"]
     WINBACK_NAME = VCFG["winback"]
@@ -855,6 +1084,13 @@ def apply_category(category, vertical="food"):
     """
     text = str(category or "").strip()
     lowered = text.lower()
+    if vertical == "tpo":
+        # TPO mode is explicit: college data goes to the TPO database
+        # only, and ONLY TPO cell numbers are ever saved (see the TPO
+        # section). The college's own main number and every staff
+        # number are deleted, never stored.
+        apply_vertical("tpo")
+        return
     if vertical == "healthcare" or any(hint in lowered for hint in HEALTHCARE_HINTS):
         apply_vertical("healthcare")
         return
@@ -916,7 +1152,14 @@ def _phone_keys(phone_field):
     for part in re.split(r"[,;/|]", str(phone_field or "")):
         d = re.sub(r"\D", "", part)
         if len(d) >= 10:
-            keys.add(d[-10:])
+            # A TPO office landline (e.g. 07926561234) keeps its FULL
+            # number as the key, so the CRM shows a dialable number.
+            # Mobiles (and every food/healthcare number) still use the
+            # last 10 digits, exactly as before.
+            if len(d) == 11 and d.startswith("0") and _is_std_landline(d):
+                keys.add(d)
+            else:
+                keys.add(d[-10:])
     return keys
 
 
@@ -1179,7 +1422,13 @@ def export_winback(tracker_outcomes, crm_owned=frozenset()):
     return len(merged)
 
 
-def scrape(location, category, max_results, want_email, headless):
+def scrape(location, category, max_results, want_email, headless,
+           tpo_mode=False):
+    """tpo_mode: Maps is only used for the college LIST here. A
+    college's Maps/main number means nothing in a TPO run - the
+    per-place phone lines, the missed-mobile debug saves and the
+    missed-mobile note are all skipped, because the TPO number
+    comes from the college website afterwards (see main())."""
     sync_playwright = import_playwright()
     query = f"{category} in {location}"
     results = []
@@ -1215,7 +1464,8 @@ def scrape(location, category, max_results, want_email, headless):
                     break
                 if not d or not d["name"]:
                     continue
-                if not split_phones(d["phone"]) and debug_saved < 3:
+                if not tpo_mode and not split_phones(d["phone"]) \
+                        and debug_saved < 3:
                     # keep copies of missed pages - the user can send one
                     # for an exact fix instead of guesswork
                     try:
@@ -1234,7 +1484,8 @@ def scrape(location, category, max_results, want_email, headless):
                 line = f"  [{i}/{len(links)}] {d['name'][:44]}"
                 if d.get("rating"):
                     line += f"  - {d['rating']}* ({d.get('reviews', 0)} reviews)"
-                line += f"  - mobile {mob[0]}" if mob else "  - no mobile"
+                if not tpo_mode:
+                    line += f"  - mobile {mob[0]}" if mob else "  - no mobile"
                 if d["emails"]:
                     line += f"  - {d['emails'][0]}"
                 print(line)
@@ -1255,7 +1506,7 @@ def scrape(location, category, max_results, want_email, headless):
                           "places")
             missed = sum(1 for r in results
                          if not split_phones(r["phone"]))
-            if results and missed:
+            if results and missed and not tpo_mode:
                 print(f"\n  {missed} place(s) had no readable mobile "
                       "number.")
                 print("  A copy of one such page is saved as "
@@ -1525,12 +1776,14 @@ def main():
                     help="hide the browser window while it works")
     ap.add_argument("--no-update", action="store_true",
                     help="skip the automatic update check")
-    ap.add_argument("--vertical", choices=["food", "healthcare"],
+    ap.add_argument("--vertical", choices=["food", "healthcare", "tpo"],
                     default="food",
                     help="food (default) or healthcare - healthcare "
                          "leads go into their OWN database "
                          "(vaani_healthcare.db), never mixed with "
-                         "restaurant data")
+                         "restaurant data; tpo - TPO CELL numbers only "
+                         "into vaani_tpo.db (college main numbers and "
+                         "staff numbers are deleted, never saved)")
     ap.add_argument("--segment", choices=["delivery"], default=None,
                     help="delivery: also write delivery_leads.xlsx - "
                          "only delivery-first mid-tier places "
@@ -1541,7 +1794,7 @@ def main():
     apply_category(requested_category, a.vertical)
     if a.segment and WORKSPACE_KEY != "restaurants":
         print("  (Note: --segment only applies to restaurants, so it "
-              "is ignored for this healthcare run.)")
+              "is ignored for this non-restaurant run.)")
         a.segment = None
 
     print(f"\n  VAANI LEAD ENGINE v{VERSION}")
@@ -1555,24 +1808,56 @@ def main():
 
     if a.vertical == "food" and WORKSPACE_KEY == "healthcare":
         print("  Category recognised as healthcare - using the Healthcare workspace.")
+    elif a.vertical == "tpo":
+        print("  TPO mode: ONLY TPO cell numbers will be saved - college "
+              "main numbers and staff numbers are deleted.")
     elif WORKSPACE_KEY not in ("restaurants", "healthcare"):
         print(f"  New category recognised - using the separate {WORKSPACE_LABEL} workspace.")
+    if a.vertical != "tpo" and any(
+            hint in a.category.lower()
+            for hint in ("college", "university", "institute")):
+        print("  (Note: this category looks like colleges - for TPO CELL "
+              "numbers, re-run with --vertical tpo.)")
 
-    rows = scrape(location, a.category, a.max, a.email, a.headless)
+    rows = scrape(location, a.category, a.max,
+                  a.email and a.vertical != "tpo", a.headless,
+                  tpo_mode=(a.vertical == "tpo"))
     if not rows:
         sys.exit(
             "\n  No places were read. Either Google is rate-limiting right "
             "now\n  (wait 30-60 minutes and run again) or no listings "
             "matched.\n  Nothing was saved.\n")
 
+    # ---- TPO mode: the TPO cell number comes from the college
+    # website's placement page, never from Maps. Colleges with no
+    # website, or no qualifying TPO cell number, get no "tpo" key
+    # and are dropped by the leads loop below.
+    if a.vertical == "tpo":
+        sites = [r for r in rows if r.get("website")]
+        if sites:
+            print(f"\n  checking {len(sites)} college websites for "
+                  "TPO placement pages (several at a time)...")
+            with ThreadPoolExecutor(max_workers=6) as ex:
+                for r, tpo in zip(sites, ex.map(
+                        lambda x: fetch_tpo_contact(x["website"]),
+                        sites)):
+                    r["tpo"] = tpo
+            got = sum(1 for r in sites if (r.get("tpo") or {}).get("phone"))
+            print(f"  TPO cell numbers found for {got} of {len(sites)} "
+                  "colleges")
+
     # ---- build the 4 databases -------------------------------------------
     # Rule: a restaurant with NO mobile number is not a lead - it is left
     # out of every file. (Landline-only counts as no number: landlines are
     # dropped by the phone filter, so nothing callable remains.)
+    # TPO rule (stricter): a college with NO TPO CELL number is not a
+    # lead - its Maps/main number and any staff number are deleted,
+    # never saved anywhere.
     leads, seen_places = [], set()
     names, locations, phones, emails = [], [], [], []
     seen_phones, seen_emails = set(), set()
     skipped_no_phone = 0
+    skipped_no_tpo = 0
     skipped_closed = 0
     for r in rows:
         key = (r["name"].lower(), r["address"].lower())
@@ -1582,11 +1867,23 @@ def main():
         if r.get("closed"):
             skipped_closed += 1
             continue
-        mob = split_phones(r["phone"])
-        if not mob:
-            skipped_no_phone += 1
-            continue
-        em = r.get("emails") or []
+        if a.vertical == "tpo":
+            tpo = r.get("tpo") or {}
+            if not tpo.get("phone"):
+                skipped_no_tpo += 1
+                continue
+            mob = [tpo["phone"]]
+            em = tpo.get("emails") or []
+            sc, tier, reasons, angle = tpo_score_lead(r, tpo)
+            if tpo.get("source"):
+                reasons = reasons + [f"Source: {tpo['source']}"]
+        else:
+            mob = split_phones(r["phone"])
+            if not mob:
+                skipped_no_phone += 1
+                continue
+            em = r.get("emails") or []
+            sc, tier, reasons, angle = score_lead(r)
         names.append(r["name"])
         if r["address"]:
             locations.append(r["address"])
@@ -1598,7 +1895,6 @@ def main():
             if e not in seen_emails:
                 seen_emails.add(e)
                 emails.append(e)
-        sc, tier, reasons, angle = score_lead(r)
         web = r.get("web") or {}
         leads.append({"name": r["name"], "location": r["address"],
                       "phone": ", ".join(mob), "email": ", ".join(em),
@@ -1646,6 +1942,12 @@ def main():
                     f"{WINBACK_NAME} ({wb_n} lead(s)) - your win-back "
                     "list.\n")
             sys.exit(msg)
+        if a.vertical == "tpo":
+            sys.exit(
+                f"\n  Found {len(rows)} places, but none of them had a "
+                "TPO cell number\n  (college main numbers and staff "
+                "numbers are deleted, never saved).\n  Nothing was "
+                "saved - try a different area.\n")
         sys.exit(
             f"\n  Found {len(rows)} places, but none of them had a mobile "
             "number\n  (landlines don't count). Nothing was saved - try a "
@@ -1700,9 +2002,16 @@ def main():
 
     # ---- summary -----------------------------------------------------------
     print("\n  DONE")
-    print(f"  {VCFG['count_label']} : {len(names)} "
-          "(every one has a mobile number)")
-    print(f"  Left out - no mobile number  : {skipped_no_phone}")
+    if a.vertical == "tpo":
+        print(f"  {VCFG['count_label']} : {len(names)} "
+              "(every one has a TPO cell number)")
+        print(f"  Left out - no TPO cell number: {skipped_no_tpo} "
+              "(includes staff-only numbers deleted, and college main "
+              "numbers never counted)")
+    else:
+        print(f"  {VCFG['count_label']} : {len(names)} "
+              "(every one has a mobile number)")
+        print(f"  Left out - no mobile number  : {skipped_no_phone}")
     if skipped_closed:
         print(f"  Left out - closed business   : {skipped_closed}")
     if suppressed_n:
@@ -1735,7 +2044,9 @@ def main():
     print(f"\n  Your 4 databases are in:\n  {outdir}")
     print(f"    - {VCFG['names_file']}")
     print("    - locations.csv")
-    print("    - phone_numbers.csv   (mobiles only)")
+    print("    - phone_numbers.csv   (TPO cell numbers only)"
+          if a.vertical == "tpo" else
+          "    - phone_numbers.csv   (mobiles only)")
     print("    - email_ids.csv")
     if excel_done:
         print("    - all_leads.xlsx      (everything combined)")
@@ -1743,6 +2054,11 @@ def main():
         print("\n  Saved under HEALTHCARE (vaani_healthcare.db) - "
               "your restaurant")
         print("  data was not touched.")
+    if a.vertical == "tpo":
+        print("\n  Saved under TPO CELLS (vaani_tpo.db) - your "
+              "restaurant")
+        print("  and clinic data was not touched. Only TPO cell "
+              "numbers are in these files.")
     print()
 
 
