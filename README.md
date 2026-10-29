@@ -150,10 +150,13 @@ number; the TPO cell's number lives on the college website's
 placement page. So a TPO run does this:
 
 1. Takes the college list from Maps for the location you give.
-2. Opens each college website, finds its placement/TPO page,
-   then follows that page's contact/team links one level deeper
-   (max 8 pages per college), and reads the number shown there
-   as the cell's own contact.
+2. Opens each college website, goes straight to its placement
+   page — following homepage links AND trying the usual
+   placement addresses directly — then follows that page's
+   contact/team links one level deeper (max 14 pages per
+   college), and reads the number shown there as the cell's own
+   contact. Pages are read in full (up to 2 MB), so footer
+   contact blocks on large modern sites are no longer cut off.
 3. Saves the college ONLY if such a number exists.
 
 The rule is strict, by instruction: **only TPO cell numbers are
@@ -183,8 +186,8 @@ py vaani.py --vertical tpo --category "Colleges" --location "Ahmedabad"
 Expect partial coverage: many colleges publish no separate TPO
 number at all (only an email, a form, or an officer's name), so the
 run summary's "Left out - no TPO cell number" count is the honest
-yield figure. The deeper crawl is v3.14.0 in the workspace and
-reaches your PC only when it is published.
+yield figure. The direct-placement crawl is v3.15.0 in the
+workspace and reaches your PC only when it is published.
 
 ## Delivery-first mid-tier segment (`--segment delivery`)
 
