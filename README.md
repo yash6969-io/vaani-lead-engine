@@ -142,6 +142,48 @@ clinic. If you forget the flag and search a clinic-like category,
 Vaani warns you before anything is saved and tells you the right
 command.
 
+## TPO cells (`--vertical tpo`) — Content365 college channel
+
+TPO runs work differently from every other vertical, because the
+number you want is NOT on Google Maps. Maps gives a college's main
+number; the TPO cell's number lives on the college website's
+placement page. So a TPO run does this:
+
+1. Takes the college list from Maps for the location you give.
+2. Opens each college website, finds its placement/TPO page, and
+   reads the number shown there as the cell's own contact.
+3. Saves the college ONLY if such a number exists.
+
+The rule is strict, by instruction: **only TPO cell numbers are
+saved**. The college's main number is never counted as a TPO
+number, and any other staff member's number is deleted — it is not
+stored in the database, the Excel file, the tracker, or the CSVs.
+When a number's context is ambiguous (for example a cell block that
+also names a person), the number is dropped rather than guessed.
+TPO office landlines ARE kept and tagged as landline, because a
+cell's published number is often a landline; mobiles are preferred
+when a page lists both. Generic TPO emails (`tpo@…`,
+`placement@…`) are kept as a secondary contact; personal emails are
+dropped.
+
+TPO data gets its own database (`vaani_tpo.db`), tracker
+(`vaani-tpo-tracker.xlsx`) and output folder
+(`leads_tpo_<location>_<date>`), so it never mixes with restaurant
+or clinic data. The CRM picks it up as a "TPO Cells" workspace
+automatically once the database exists.
+
+Pilot command (Ahmedabad only):
+
+```
+py vaani.py --vertical tpo --category "Colleges" --location "Ahmedabad"
+```
+
+Expect partial coverage: many colleges publish no separate TPO
+number at all (only an email, a form, or an officer's name), so the
+run summary's "Left out - no TPO cell number" count is the honest
+yield figure. This mode is v3.13.0 in the workspace and reaches
+your PC only when it is published — it is NOT on the channel yet.
+
 ## Delivery-first mid-tier segment (`--segment delivery`)
 
 Restaurants only. Adds one extra file to the run folder,
