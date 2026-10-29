@@ -35,7 +35,7 @@ import sqlite3
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
-VERSION = "3.13.0"
+VERSION = "3.14.0"
 UPDATE_URL = ("https://raw.githubusercontent.com/yash6969-io/"
               "vaani-lead-engine/main/vaani.py")
 
@@ -729,6 +729,41 @@ def find_tpo_links(homepage_html, base_url):
     return found[:4]
 
 
+TPO_DEEP_HINTS = ("contact", "contact-us", "reach", "team",
+                  "about", "get-in-touch", "connect")
+TPO_SKIP_EXT = (".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt",
+                ".pptx", ".jpg", ".jpeg", ".png", ".gif", ".zip")
+
+
+def find_tpo_deep_links(page_html, page_url, website, seen):
+    """Second-level links from a placement page: its contact/team
+    pages, where colleges often put the cell's number instead of
+    the placement page itself. Same-origin only; skips files,
+    mailto/tel links and pages already visited. The cell/person
+    rules still judge every number found there, so a general
+    contact page's main number can never qualify."""
+    found = []
+    for href, label in re.findall(
+            r'<a\s[^>]*href="([^"]+)"[^>]*>(.*?)</a>',
+            page_html, flags=re.I | re.S):
+        hl, tl = href.lower(), re.sub(r"<[^>]+>", " ", label).lower()
+        if not any(h in hl or h in tl
+                   for h in TPO_PAGE_HINTS + TPO_DEEP_HINTS):
+            continue
+        if hl.startswith(("mailto:", "tel:", "javascript:")):
+            continue
+        if hl.split("?")[0].split("#")[0].endswith(TPO_SKIP_EXT):
+            continue
+        url = urllib.parse.urljoin(page_url, href).split("#")[0]
+        if urllib.parse.urlparse(url).netloc != \
+                urllib.parse.urlparse(website).netloc:
+            continue
+        if url in seen or url in found:
+            continue
+        found.append(url)
+    return found
+
+
 def _fetch_html(url):
     try:
         req = urllib.request.Request(url, headers={"User-Agent": BROWSER_UA})
@@ -742,18 +777,42 @@ def fetch_tpo_contact(website):
     """TPO cell contact for one college website. Returns
     {phone, phone_kind, emails, source} or all-empty when no
     qualifying TPO cell number exists. The Maps/main number is
-    never consulted here, so it can never become a TPO number."""
+    never consulted here, so it can never become a TPO number.
+    Two-level crawl, max 8 pages per college: the homepage, its
+    placement/TPO pages, then the contact/team pages those
+    placement pages link to. The cell/person rules judge every
+    page, so the deeper level can only add cell-labelled numbers,
+    never main or staff numbers."""
     result = {"phone": "", "phone_kind": "", "emails": [], "source": ""}
     if not website or "google." in website:
         return result
     home = _fetch_html(website)
     if not home:
         return result
-    pages = [website] + find_tpo_links(home, website)
+    l1 = [u for u in find_tpo_links(home, website)
+          if u.rstrip("/") != website.rstrip("/")]
+    seen = {website} | set(l1)
+    fetched = {website: home}
+    for url in l1:
+        html = _fetch_html(url)
+        if html:
+            fetched[url] = html
+    deep = []
+    for url in l1:
+        html = fetched.get(url)
+        if html:
+            deep += find_tpo_deep_links(html, url, website, seen)
+        if len(deep) >= 3:
+            break
+    deep = deep[:3]
+    for url in deep:
+        html = _fetch_html(url)
+        if html:
+            fetched[url] = html
     mobiles, landline, emails = [], "", []
     mobile_source, landline_source = "", ""
-    for url in pages:
-        html = home if url == website else _fetch_html(url)
+    for url in [website] + l1 + deep:
+        html = fetched.get(url)
         if not html:
             continue
         numbers, page_emails = extract_tpo_from_html(html)
