@@ -35,7 +35,7 @@ import sqlite3
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
-VERSION = "3.14.0"
+VERSION = "3.15.0"
 UPDATE_URL = ("https://raw.githubusercontent.com/yash6969-io/"
               "vaani-lead-engine/main/vaani.py")
 
@@ -620,14 +620,27 @@ TPO_MOBILE_RE = re.compile(r"(?:\+?91[\s\-]?|0)?([6-9]\d{4}[\s\-]?\d{5})")
 
 
 def _tpo_landline(raw):
-    """Return the full landline digits (with trunk 0), or None."""
+    """Return the full landline digits (with trunk 0), or None.
+    A subscriber starting 6-9 is accepted only when the raw text
+    puts a separator right after the STD code ("079-66046304"):
+    that shape cannot be a mobile, which is written 5+5. Without
+    the separator the digits are ambiguous with a trunk-0 mobile
+    ("07966046304" also reads as mobile 7966046304) and are
+    rejected, as before."""
     digits = re.sub(r"\D", "", str(raw))
     if len(digits) in (10, 11) and digits.startswith("0"):
         body = digits[1:]
         for ln in (4, 3, 2):
             if body[:ln] in STD_CODES:
                 sub = body[ln:]
-                if sub and sub[0] in "2345" and len(sub) >= 6:
+                if not sub or len(sub) < 6:
+                    continue
+                raw_str = str(raw).strip()
+                after_std = raw_str[1 + ln:2 + ln]
+                if after_std in (" ", "-", "\u2013", "\u2014"):
+                    if sub[0] in "23456789":
+                        return digits
+                elif sub[0] in "2345":
                     return digits
     return None
 
@@ -635,10 +648,12 @@ def _tpo_landline(raw):
 def _tpo_block_numbers(block, context=None):
     """Qualifying numbers in one text block. The block qualifies only
     when its context names the cell/office AND names no person. The
-    context is the block plus the two lines above it, because real
-    pages put the label on one line and the number on the next:
-        Training and Placement Cell
-        Phone: 98765 43210
+    context is the block plus the four lines above it, because real
+    pages put the label, then Phone:, then Mobile: on separate
+    lines (Silver Oak's footer: cell address, Phone:, Mobile:):
+        Training and Placement Cell, Block - EB, 6th floor
+        Phone: 079-35201300, 079-66046304
+        Mobile: +91 9924951604
     Candidates still come from the block itself only, so a number is
     never counted twice and never borrows a neighbour's digits."""
     context = block if context is None else context
@@ -682,7 +697,7 @@ def extract_tpo_from_html(html):
     numbers, emails = [], []
     blocks = _tpo_text_blocks(html)
     for i, block in enumerate(blocks):
-        window = " ".join(blocks[max(0, i - 2):i + 1])
+        window = " ".join(blocks[max(0, i - 4):i + 1])
         for num, kind in _tpo_block_numbers(block, window):
             if (num, kind) not in numbers:
                 numbers.append((num, kind))
@@ -731,6 +746,9 @@ def find_tpo_links(homepage_html, base_url):
 
 TPO_DEEP_HINTS = ("contact", "contact-us", "reach", "team",
                   "about", "get-in-touch", "connect")
+TPO_DIRECT_PATHS = ("placement", "placements", "placement-cell",
+                    "placementcell", "tpo", "training-and-placement",
+                    "training-placement", "placement-office")
 TPO_SKIP_EXT = (".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt",
                 ".pptx", ".jpg", ".jpeg", ".png", ".gif", ".zip")
 
@@ -768,7 +786,11 @@ def _fetch_html(url):
     try:
         req = urllib.request.Request(url, headers={"User-Agent": BROWSER_UA})
         with urllib.request.urlopen(req, timeout=8) as resp:
-            return resp.read(300000).decode("utf-8", "replace")
+            # 2 MB: modern college pages (Next.js payloads) run past
+            # 1 MB, and the TPO block often sits in the footer at the
+            # very end - Silver Oak's placement page is 1.16 MB and a
+            # 300 KB cap cut its TPO block off entirely.
+            return resp.read(2000000).decode("utf-8", "replace")
     except Exception:
         return ""
 
@@ -778,11 +800,13 @@ def fetch_tpo_contact(website):
     {phone, phone_kind, emails, source} or all-empty when no
     qualifying TPO cell number exists. The Maps/main number is
     never consulted here, so it can never become a TPO number.
-    Two-level crawl, max 8 pages per college: the homepage, its
-    placement/TPO pages, then the contact/team pages those
-    placement pages link to. The cell/person rules judge every
-    page, so the deeper level can only add cell-labelled numbers,
-    never main or staff numbers."""
+    Two-level crawl, max 14 pages per college: the homepage, its
+    placement/TPO pages, the usual placement addresses tried
+    directly (a placement page is not always linked from the
+    homepage with a recognisable label), then the contact/team
+    pages those placement pages link to. The cell/person rules
+    judge every page, so the deeper levels can only add
+    cell-labelled numbers, never main or staff numbers."""
     result = {"phone": "", "phone_kind": "", "emails": [], "source": ""}
     if not website or "google." in website:
         return result
@@ -797,8 +821,20 @@ def fetch_tpo_contact(website):
         html = _fetch_html(url)
         if html:
             fetched[url] = html
+    guesses = []
+    for path in TPO_DIRECT_PATHS:
+        url = website.rstrip("/") + "/" + path
+        if url not in seen:
+            guesses.append(url)
+        if len(guesses) >= 6:
+            break
+    seen |= set(guesses)
+    for url in guesses:
+        html = _fetch_html(url)
+        if html:
+            fetched[url] = html
     deep = []
-    for url in l1:
+    for url in l1 + guesses:
         html = fetched.get(url)
         if html:
             deep += find_tpo_deep_links(html, url, website, seen)
@@ -811,7 +847,7 @@ def fetch_tpo_contact(website):
             fetched[url] = html
     mobiles, landline, emails = [], "", []
     mobile_source, landline_source = "", ""
-    for url in [website] + l1 + deep:
+    for url in [website] + l1 + guesses + deep:
         html = fetched.get(url)
         if not html:
             continue
