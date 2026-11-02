@@ -35,7 +35,7 @@ import sqlite3
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
-VERSION = "3.15.0"
+VERSION = "3.16.0"
 UPDATE_URL = ("https://raw.githubusercontent.com/yash6969-io/"
               "vaani-lead-engine/main/vaani.py")
 
@@ -584,22 +584,39 @@ def fetch_emails(website):
 
 
 # ---------------------------------------------------------------- TPO mode
-# --vertical tpo: Training & Placement CELL numbers only.
-# The rule is strict and absolute, by the user's instruction:
-#   * a number is saved ONLY if it is presented as the TPO CELL's
-#     own contact (a placement-page block labelled as the cell or
-#     its office, with no person's name attached);
-#   * the college's main number from Google Maps is NEVER a TPO
-#     number and is never saved in a TPO run;
-#   * any other staff member's number found anywhere is DELETED -
-#     it is not stored in any output (database, Excel, tracker,
-#     or CSV). When in doubt, the number is dropped.
-# A college with no qualifying TPO cell number is not a lead at all
-# and is left out of every file, exactly like the no-mobile rule
-# for restaurants. TPO office landlines ARE kept (a cell's published
-# number is often a landline) and are tagged as landline, because
-# dropping them would delete most real TPO cells; mobiles are
-# preferred when a page lists both.
+# --vertical tpo: Training & Placement CELL numbers first, with a
+# labelled fallback, from a full-site crawl (v3.16).
+# The crawl: every college/school website is walked priority-first
+# (homepage, placement/TPO pages, direct placement guesses,
+# contact/team pages from placement pages) and then breadth-first
+# over every other same-origin page, up to 40 pages per site, so a
+# TPO number hiding on an unlinked or oddly-named page is still
+# found. Only same-origin pages are fetched; files, mailto/tel
+# links and off-site links are skipped.
+# The tiers, best first - a college is saved with the best number
+# its site actually publishes, and the tier label says where that
+# number came from, so a fallback is never mistaken for a TPO
+# number:
+#   Tier 1 "TPO cell": presented as the TPO/placement cell's own
+#     contact (unchanged 3.13-3.15 rule);
+#   Tier 2 office: presented as another office's contact -
+#     admissions, career services, registrar, admin, student
+#     services (labelled with that office's name);
+#   Tier 3 "General": any other number on the site with no office
+#     label (footer/header/contact-page number), labelled General.
+# Two rules from the original brief are NOT relaxed:
+#   * a number attached to a named person (officer, professor,
+#     coordinator, "Contact Person: <Name>") is DELETED at every
+#     tier - it is never downgraded into a fallback, and never
+#     stored in any output. When in doubt, the number is dropped.
+#   * the college's main number from Google Maps is NEVER used -
+#     every fallback number comes from the website itself, with
+#     its section label and source page.
+# A college with no number anywhere on its crawled site is still
+# left out of every file (there is nothing to give). TPO office
+# landlines ARE kept and tagged as landline, because a cell's
+# published number is often a landline; mobiles are preferred
+# when a page lists both.
 TPO_PAGE_HINTS = ("placement", "tpo", "training-and-placement",
                   "training & placement", "training and placement",
                   "placement-cell", "placementcell", "career")
@@ -611,8 +628,22 @@ TPO_CELL_RE = re.compile(
 TPO_PERSON_RE = re.compile(
     r"(Dr\.|Mr\.|Ms\.|Mrs\.|Prof\.|Er\.)\s*[A-Z]|"
     r"(?:Placement Officer|Training and Placement Officer|TPO|"
-    r"Coordinator|Head|Contact Person)\s*[:\-–—]\s*"
+    r"Coordinator|Head|Contact Person|Officer)\s*[:\-–—]\s*"
     r"(?!Cell\b|Office\b|Department\b)[A-Z][a-z]+")
+# Tier 2 office labels, in the order they are checked: the first
+# match names the fallback (an "Admissions Office" block is an
+# admissions number even if it also says "office" generically).
+TPO_OFFICE_RES = (
+    (r"admissions?\s*(?:office|cell|department|desk|enquiry|"
+     r"helpdesk|helpline)", "Admissions office"),
+    (r"admissions?\s*($|:)", "Admissions office"),
+    (r"career\s*(?:services|centre|center|development)|"
+     r"careers\s*office", "Career services"),
+    (r"registrar(?:\s*office)?", "Registrar office"),
+    (r"administrative\s*office|administration\s*office|"
+     r"admin\s*office", "Admin office"),
+    (r"student\s*(?:services|support)", "Student services"),
+)
 TPO_GENERIC_EMAILS = ("tpo", "placement", "placements", "placementcell",
                       "tpocell", "training", "trainingplacement",
                       "careers", "career", "placementoffice", "tpooffice")
@@ -645,34 +676,54 @@ def _tpo_landline(raw):
     return None
 
 
+def _tpo_tier_label(context):
+    """(tier, label) for a block's context: 1 when the context names
+    the TPO/placement cell, 2 when it names another office, else 3
+    (General). Returns None when the context names a person - that
+    number is deleted at every tier, never downgraded."""
+    if TPO_PERSON_RE.search(context):
+        return None
+    if TPO_CELL_RE.search(context):
+        return 1, "TPO cell"
+    for pattern, label in TPO_OFFICE_RES:
+        if re.search(pattern, context, re.I):
+            return 2, label
+    return 3, "General"
+
+
 def _tpo_block_numbers(block, context=None):
-    """Qualifying numbers in one text block. The block qualifies only
-    when its context names the cell/office AND names no person. The
-    context is the block plus the four lines above it, because real
-    pages put the label, then Phone:, then Mobile: on separate
-    lines (Silver Oak's footer: cell address, Phone:, Mobile:):
+    """Tiered numbers in one text block. The block's tier comes from
+    its context (the block plus the four lines above it, because
+    real pages put the label, then Phone:, then Mobile: on separate
+    lines - Silver Oak's footer: cell address, Phone:, Mobile:):
         Training and Placement Cell, Block - EB, 6th floor
         Phone: 079-35201300, 079-66046304
         Mobile: +91 9924951604
     Candidates still come from the block itself only, so a number is
-    never counted twice and never borrows a neighbour's digits."""
+    never counted twice and never borrows a neighbour's digits.
+    Fax numbers are skipped: a number with "fax" before it in the
+    same block is a fax line, not a callable contact."""
     context = block if context is None else context
-    if not TPO_CELL_RE.search(context):
+    tiered = _tpo_tier_label(context)
+    if tiered is None:
         return []
-    if TPO_PERSON_RE.search(context):
-        return []
+    tier, label = tiered
     out = []
     for m in TPO_MOBILE_RE.finditer(block):
+        if "fax" in block[:m.start()].lower():
+            continue
         mob = clean_phone(m.group(0))
-        if mob and (mob, "mobile") not in out:
-            out.append((mob, "mobile"))
+        if mob and (mob, "mobile", tier, label) not in out:
+            out.append((mob, "mobile", tier, label))
     # Landlines are written with separators in every position
     # ("079-2656 1234"), so take loose 0-led candidates and let the
     # STD + subscriber validation decide, instead of a rigid shape.
     for m in re.finditer(r"0[\d\s\-]{7,14}\d", block):
+        if "fax" in block[:m.start()].lower():
+            continue
         land = _tpo_landline(m.group(0))
-        if land and (land, "landline") not in out:
-            out.append((land, "landline"))
+        if land and (land, "landline", tier, label) not in out:
+            out.append((land, "landline", tier, label))
     return out
 
 
@@ -691,30 +742,44 @@ def _tpo_text_blocks(html):
 
 
 def extract_tpo_from_html(html):
-    """Pure parser (no network): TPO cell numbers + generic TPO
-    emails found in one page's HTML. Staff numbers are dropped here
-    and never returned, so they cannot leak into any output."""
+    """Pure parser (no network): tiered numbers + generic TPO
+    emails found in one page's HTML. Returns numbers as
+    (number, kind, tier, label); tier 1 = TPO cell, 2 = named
+    office, 3 = General. Staff numbers are dropped here and never
+    returned, so they cannot leak into any output at any tier."""
     numbers, emails = [], []
     blocks = _tpo_text_blocks(html)
     for i, block in enumerate(blocks):
+        # A bare number on the line right after a "Fax:" line is
+        # the fax number, not a contact - skip the whole block.
+        # (Same-block "Phone: X, Fax: Y" is handled inside
+        # _tpo_block_numbers; this covers the separate-lines
+        # footer layout, where the fax block itself carries no
+        # "fax" text for the in-block check to see.)
+        if i > 0 and "fax" in blocks[i - 1].lower() \
+                and re.fullmatch(r"[0-9\s\-\+\(\)]+", block):
+            continue
         window = " ".join(blocks[max(0, i - 4):i + 1])
-        for num, kind in _tpo_block_numbers(block, window):
-            if (num, kind) not in numbers:
-                numbers.append((num, kind))
-    # tel: links whose label names the cell/office (label-only links
-    # carry no usable block text, so the anchor text IS the block)
+        for entry in _tpo_block_numbers(block, window):
+            if entry not in numbers:
+                numbers.append(entry)
+    # tel: links: the anchor text IS the block (label-only links
+    # carry no usable block text), judged by the same tiers; an
+    # unlabelled tel: link is a General number, not a cell one.
     for href, label in re.findall(
             r'<a\s[^>]*href="tel:([^"]+)"[^>]*>(.*?)</a>',
             html, flags=re.I | re.S):
         label_text = re.sub(r"<[^>]+>", " ", label).strip()
-        if TPO_CELL_RE.search(label_text) \
-                and not TPO_PERSON_RE.search(label_text):
-            mob = clean_phone(href)
-            if mob and (mob, "mobile") not in numbers:
-                numbers.append((mob, "mobile"))
-            land = _tpo_landline(href)
-            if land and (land, "landline") not in numbers:
-                numbers.append((land, "landline"))
+        tiered = _tpo_tier_label(label_text)
+        if tiered is None:
+            continue
+        tier, lbl = tiered
+        mob = clean_phone(href)
+        if mob and (mob, "mobile", tier, lbl) not in numbers:
+            numbers.append((mob, "mobile", tier, lbl))
+        land = _tpo_landline(href)
+        if land and (land, "landline", tier, lbl) not in numbers:
+            numbers.append((land, "landline", tier, lbl))
     for e in split_emails(html):
         local = e.split("@")[0]
         if local in TPO_GENERIC_EMAILS or local.startswith("tpo") \
@@ -782,6 +847,47 @@ def find_tpo_deep_links(page_html, page_url, website, seen):
     return found
 
 
+TPO_JUNK_PATHS = ("/wp-admin", "/wp-json", "/wp-login", "/login",
+                  "/signin", "/signup", "/register", "/cart",
+                  "/checkout", "/feed", "/sitemap")
+TPO_PAGE_BUDGET = 40
+
+
+def find_tpo_general_links(page_html, page_url, website, seen):
+    """Breadth links for the full-site phase: every same-origin
+    internal link, priority-sorted so pages that could carry a
+    cell/office number come first (placement, career, admission,
+    contact, about), then everything else. Files, mailto/tel/
+    javascript links, fragments, off-site links and admin/login/
+    cart paths are skipped. A general page's main number can only
+    ever qualify as Tier 3, never as a TPO number."""
+    priority, rest = [], []
+    for href, label in re.findall(
+            r'<a\s[^>]*href="([^"]+)"[^>]*>(.*?)</a>',
+            page_html, flags=re.I | re.S):
+        hl, tl = href.lower(), re.sub(r"<[^>]+>", " ", label).lower()
+        if hl.startswith(("mailto:", "tel:", "javascript:", "#")):
+            continue
+        if hl.split("?")[0].split("#")[0].endswith(TPO_SKIP_EXT):
+            continue
+        url = urllib.parse.urljoin(page_url, href).split("#")[0]
+        if urllib.parse.urlparse(url).netloc != \
+                urllib.parse.urlparse(website).netloc:
+            continue
+        if url in seen or url in priority or url in rest:
+            continue
+        path = urllib.parse.urlparse(url).path.lower()
+        if any(path.startswith(j) for j in TPO_JUNK_PATHS):
+            continue
+        if any(h in hl or h in tl
+               for h in TPO_PAGE_HINTS + TPO_DEEP_HINTS
+               + ("admission", "about", "office", "enquiry")):
+            priority.append(url)
+        else:
+            rest.append(url)
+    return priority + rest
+
+
 def _fetch_html(url):
     try:
         req = urllib.request.Request(url, headers={"User-Agent": BROWSER_UA})
@@ -796,18 +902,23 @@ def _fetch_html(url):
 
 
 def fetch_tpo_contact(website):
-    """TPO cell contact for one college website. Returns
-    {phone, phone_kind, emails, source} or all-empty when no
-    qualifying TPO cell number exists. The Maps/main number is
-    never consulted here, so it can never become a TPO number.
-    Two-level crawl, max 14 pages per college: the homepage, its
-    placement/TPO pages, the usual placement addresses tried
+    """Best contact for one college website. Returns {phone,
+    phone_kind, tier, label, emails, source} or all-empty when the
+    crawled site publishes no number at all. The Maps/main number
+    is never consulted here, so it can never become a fallback.
+    Crawl, priority-first, max 40 pages per college: the homepage,
+    its placement/TPO pages, the usual placement addresses tried
     directly (a placement page is not always linked from the
     homepage with a recognisable label), then the contact/team
-    pages those placement pages link to. The cell/person rules
-    judge every page, so the deeper levels can only add
-    cell-labelled numbers, never main or staff numbers."""
-    result = {"phone": "", "phone_kind": "", "emails": [], "source": ""}
+    pages those placement pages link to - and, only when no Tier-1
+    TPO cell number has been found yet, breadth-first over every
+    other same-origin page, because a fallback is pointless once
+    the real cell number exists. The tier rules judge every page,
+    so deeper pages can only add numbers at their own tier, and
+    staff numbers are dropped everywhere. Within a tier, a mobile
+    beats a landline."""
+    result = {"phone": "", "phone_kind": "", "tier": 0, "label": "",
+              "emails": [], "source": ""}
     if not website or "google." in website:
         return result
     home = _fetch_html(website)
@@ -841,57 +952,101 @@ def fetch_tpo_contact(website):
         if len(deep) >= 3:
             break
     deep = deep[:3]
+    seen |= set(deep)
     for url in deep:
         html = _fetch_html(url)
         if html:
             fetched[url] = html
-    mobiles, landline, emails = [], "", []
-    mobile_source, landline_source = "", ""
-    for url in [website] + l1 + guesses + deep:
-        html = fetched.get(url)
-        if not html:
-            continue
-        numbers, page_emails = extract_tpo_from_html(html)
-        for num, kind in numbers:
-            if kind == "mobile" and num not in mobiles:
-                mobiles.append(num)
-                if not mobile_source:
-                    mobile_source = url
-            elif kind == "landline" and not landline:
-                landline = num
-                if not landline_source:
-                    landline_source = url
-        for e in page_emails:
-            if e not in emails:
-                emails.append(e)
-    if mobiles:
-        result["phone"], result["phone_kind"] = mobiles[0], "mobile"
-        result["source"] = mobile_source
-    elif landline:
-        result["phone"], result["phone_kind"] = landline, "landline"
-        result["source"] = landline_source
+
+    def _parse_all():
+        """Best (tier, kind, number, label, page) across fetched
+        pages so far, plus every generic TPO email found."""
+        best, emails = None, []
+        for url in [website] + l1 + guesses + deep + breadth:
+            html = fetched.get(url)
+            if not html:
+                continue
+            numbers, page_emails = extract_tpo_from_html(html)
+            for num, kind, tier, lbl in numbers:
+                rank = (tier, 0 if kind == "mobile" else 1)
+                if best is None or rank < best[0]:
+                    best = (rank, num, kind, tier, lbl, url)
+            for e in page_emails:
+                if e not in emails:
+                    emails.append(e)
+        return best, emails
+
+    breadth = []
+    best, emails = _parse_all()
+    if best is None or best[3] > 1:
+        # No Tier-1 number yet: walk the rest of the site. The
+        # queue is rebuilt from every fetched page so deeper
+        # sections are reached, and stops at the page budget.
+        # The budget counts fetch ATTEMPTS (phase A already tried
+        # the homepage, placement links, guesses and deep links),
+        # so a site with many dead guesses cannot blow past it.
+        tried = 1 + len(l1) + len(guesses) + len(deep)
+        queue = []
+        for url in [website] + l1 + guesses + deep:
+            html = fetched.get(url)
+            if html:
+                queue += find_tpo_general_links(html, url, website,
+                                                seen)
+        seen |= set(queue)
+        while queue and tried < TPO_PAGE_BUDGET:
+            url = queue.pop(0)
+            if url in fetched:
+                continue
+            tried += 1
+            html = _fetch_html(url)
+            if not html:
+                continue
+            fetched[url] = html
+            breadth.append(url)
+            queue += find_tpo_general_links(html, url, website, seen)
+            seen |= set(queue)
+        best, emails = _parse_all()
+    if best is not None:
+        _, num, kind, tier, lbl, url = best
+        result["phone"], result["phone_kind"] = num, kind
+        result["tier"], result["label"] = tier, lbl
+        result["source"] = url
     result["emails"] = emails[:3]
     return result
 
 
 def tpo_score_lead(r, tpo):
     """TPO contactability score (starting estimate, NOT the food
-    rubric): a TPO mobile is worth more than a landline because it
-    can also take WhatsApp; a generic TPO email and a website add
-    reach. Bands reuse A>=75 / B 50-74 / C<50 so call order works."""
-    reasons = []
-    score = 60 if tpo["phone_kind"] == "mobile" else 40
-    reasons.append("TPO cell mobile from placement page"
-                   if tpo["phone_kind"] == "mobile"
-                   else "TPO cell landline from placement page")
+    rubric). Tier 1 keeps the 3.13 values: a TPO mobile is worth
+    more than a landline because it can also take WhatsApp; a
+    generic TPO email and a website add reach. Fallbacks score
+    lower by design, so a fallback number can never outrank a
+    real TPO cell number: Tier 2 caps at 70 (B), Tier 3 at 55
+    (low B). The reason always names the tier, so the caller
+    sees what kind of number they are dialling. Bands reuse
+    A>=75 / B 50-74 / C<50 so call order works."""
+    tier = tpo.get("tier") or 1
+    kind = tpo.get("phone_kind")
+    if tier <= 1:
+        score = 60 if kind == "mobile" else 40
+        reasons = ["TPO cell mobile from placement page"
+                   if kind == "mobile"
+                   else "TPO cell landline from placement page"]
+        angle = "TPO cell outreach"
+    else:
+        base = (30, 20) if tier == 2 else (15, 10)
+        score = base[0] if kind == "mobile" else base[1]
+        label = tpo.get("label") or "General"
+        reasons = [f"{label} {kind} - fallback, not a TPO cell number"]
+        angle = "Fallback college number"
     if tpo.get("emails"):
         score += 20
         reasons.append("TPO email found")
     if r.get("website"):
         score += 20
         reasons.append("Has website")
-    tier = "A" if score >= 75 else "B" if score >= 50 else "C"
-    return score, tier, reasons, "TPO cell outreach"
+    tier_out = "A" if score >= 75 else "B" if score >= 50 else "C"
+    return score, tier_out, reasons, angle
 
 
 # ---------------------------------------------------------------- scoring
@@ -1181,9 +1336,10 @@ def apply_category(category, vertical="food"):
     lowered = text.lower()
     if vertical == "tpo":
         # TPO mode is explicit: college data goes to the TPO database
-        # only, and ONLY TPO cell numbers are ever saved (see the TPO
-        # section). The college's own main number and every staff
-        # number are deleted, never stored.
+        # only. Tier 1 is the TPO cell's own number; Tier 2/3 are
+        # labelled fallbacks from the website itself. The college's
+        # own main number and every staff number are deleted, never
+        # stored.
         apply_vertical("tpo")
         return
     if vertical == "healthcare" or any(hint in lowered for hint in HEALTHCARE_HINTS):
@@ -1876,8 +2032,9 @@ def main():
                     help="food (default) or healthcare - healthcare "
                          "leads go into their OWN database "
                          "(vaani_healthcare.db), never mixed with "
-                         "restaurant data; tpo - TPO CELL numbers only "
-                         "into vaani_tpo.db (college main numbers and "
+                         "restaurant data; tpo - TPO cell numbers "
+                         "first, labelled fallbacks after, into "
+                         "vaani_tpo.db (college main numbers and "
                          "staff numbers are deleted, never saved)")
     ap.add_argument("--segment", choices=["delivery"], default=None,
                     help="delivery: also write delivery_leads.xlsx - "
@@ -1923,10 +2080,13 @@ def main():
             "now\n  (wait 30-60 minutes and run again) or no listings "
             "matched.\n  Nothing was saved.\n")
 
-    # ---- TPO mode: the TPO cell number comes from the college
-    # website's placement page, never from Maps. Colleges with no
-    # website, or no qualifying TPO cell number, get no "tpo" key
-    # and are dropped by the leads loop below.
+    # ---- TPO mode: the contact number comes from the college
+    # website itself, never from Maps. Tier 1 is the TPO cell's
+    # own number; Tier 2/3 are labelled fallbacks (another office,
+    # or a general website number). Colleges with no website, or
+    # no number anywhere on their crawled site, get no "tpo" key
+    # and are dropped by the leads loop below. Staff numbers are
+    # deleted at every tier, never downgraded into a fallback.
     if a.vertical == "tpo":
         sites = [r for r in rows if r.get("website")]
         if sites:
@@ -1945,15 +2105,17 @@ def main():
     # Rule: a restaurant with NO mobile number is not a lead - it is left
     # out of every file. (Landline-only counts as no number: landlines are
     # dropped by the phone filter, so nothing callable remains.)
-    # TPO rule (stricter): a college with NO TPO CELL number is not a
-    # lead - its Maps/main number and any staff number are deleted,
-    # never saved anywhere.
+    # TPO rule: a college with NO number anywhere on its crawled
+    # website is not a lead. Its Maps/main number is never counted,
+    # and any staff number is deleted, never saved anywhere.
     leads, seen_places = [], set()
     names, locations, phones, emails = [], [], [], []
     seen_phones, seen_emails = set(), set()
     skipped_no_phone = 0
     skipped_no_tpo = 0
     skipped_closed = 0
+    tpo_tier1_n = 0
+    tpo_fallback_n = 0
     for r in rows:
         key = (r["name"].lower(), r["address"].lower())
         if key in seen_places:
@@ -1967,6 +2129,10 @@ def main():
             if not tpo.get("phone"):
                 skipped_no_tpo += 1
                 continue
+            if (tpo.get("tier") or 1) <= 1:
+                tpo_tier1_n += 1
+            else:
+                tpo_fallback_n += 1
             mob = [tpo["phone"]]
             em = tpo.get("emails") or []
             sc, tier, reasons, angle = tpo_score_lead(r, tpo)
@@ -2039,9 +2205,10 @@ def main():
             sys.exit(msg)
         if a.vertical == "tpo":
             sys.exit(
-                f"\n  Found {len(rows)} places, but none of them had a "
-                "TPO cell number\n  (college main numbers and staff "
-                "numbers are deleted, never saved).\n  Nothing was "
+                f"\n  Found {len(rows)} places, but none of them had "
+                "any number\n  on their websites (college main numbers "
+                "from Maps are never\n  counted, and staff numbers are "
+                "deleted, never saved).\n  Nothing was "
                 "saved - try a different area.\n")
         sys.exit(
             f"\n  Found {len(rows)} places, but none of them had a mobile "
@@ -2099,8 +2266,10 @@ def main():
     print("\n  DONE")
     if a.vertical == "tpo":
         print(f"  {VCFG['count_label']} : {len(names)} "
-              "(every one has a TPO cell number)")
-        print(f"  Left out - no TPO cell number: {skipped_no_tpo} "
+              f"({tpo_tier1_n} TPO cell numbers, {tpo_fallback_n} "
+              "labelled fallbacks - another office or general)")
+        print(f"  Left out - no number found on website: "
+              f"{skipped_no_tpo} "
               "(includes staff-only numbers deleted, and college main "
               "numbers never counted)")
     else:
