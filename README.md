@@ -192,12 +192,33 @@ Pilot command (Ahmedabad only):
 py vaani.py --vertical tpo --category "Colleges" --location "Ahmedabad"
 ```
 
+Branch scope (v3.17): before any website is crawled, colleges
+whose students cannot join the student programme are dropped on
+their Maps name/category — law and pharmacy colleges, plus the
+other standalone professional health branches (medical, dental,
+ayurvedic, homeopathic, nursing, physiotherapy). They are never
+crawled, so they cost zero run time, and the run summary reports
+them as "Left out - out-of-scope branch". Everything else is
+crawled: management, commerce, engineering/IT, arts, science and
+generic universities. BBA/MBA priority (v3.17): when a crawled
+site mentions BBA/MBA/PGDM-type programmes, the lead gets +10
+(capped at 100) and the reason "BBA/MBA programs mentioned on
+website", so confirmed management colleges sort first in call
+order; colleges without the signal are still kept.
+
+Speed (v3.17): the crawl stops the moment a Tier-1 mobile is
+found instead of fetching every priority page first, and TPO
+runs crawl 10 colleges at a time instead of 6. Colleges with no
+TPO number still get the full walk, so a run still takes
+minutes — just with the wasted fetches cut out.
+
 Expect better coverage than the early pilots: a college is left
-out only when its whole crawled site publishes no number at all,
-so the run summary's "Left out - no number found on website"
-count is the honest yield figure, with the TPO-cell vs fallback
-split printed beside it. The full-site crawl is v3.16.0 in the
-workspace and reaches your PC only when it is published.
+out only when it is out of scope, or when its whole crawled site
+publishes no number at all, so the run summary's "Left out"
+counts are the honest yield figures, with the TPO-cell vs
+fallback split printed beside them. The branch scope, management
+priority and faster crawl are v3.17.0 in the
+workspace and reach your PC only when they are published.
 
 ## Delivery-first mid-tier segment (`--segment delivery`)
 
