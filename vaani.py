@@ -35,7 +35,7 @@ import sqlite3
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
-VERSION = "3.16.0"
+VERSION = "3.17.0"
 UPDATE_URL = ("https://raw.githubusercontent.com/yash6969-io/"
               "vaani-lead-engine/main/vaani.py")
 
@@ -851,6 +851,52 @@ TPO_JUNK_PATHS = ("/wp-admin", "/wp-json", "/wp-login", "/login",
                   "/signin", "/signup", "/register", "/cart",
                   "/checkout", "/feed", "/sitemap")
 TPO_PAGE_BUDGET = 40
+# Branch scope for the Content365 student programme (v3.17).
+# Colleges whose students cannot join it are dropped on their
+# Maps name/category BEFORE any website fetch, so they cost zero
+# crawl time. Law and pharmacy are the user's words; the other
+# standalone professional health branches follow the same
+# principle (their students are not BBA/MBA/marketing/sales/IT
+# students). Everything else passes - management, commerce,
+# engineering/IT, arts, science and generic universities. A
+# generic name MUST be crawled: it is often the university that
+# runs the BBA/MBA programmes, and dropping generics would gut
+# the list. A separately-listed "Institute of Law" is dropped
+# while its parent university still passes.
+TPO_SCOPE_EXCLUDE = (
+    (re.compile(r"\blaw\b|\blegal\b", re.I), "Law"),
+    (re.compile(r"pharm\w*", re.I), "Pharmacy"),
+    (re.compile(r"\bmedical\b", re.I), "Medical"),
+    (re.compile(r"\bdental\b", re.I), "Dental"),
+    (re.compile(r"ayurved\w*", re.I), "Ayurvedic"),
+    (re.compile(r"homeopath\w*", re.I), "Homeopathic"),
+    (re.compile(r"\bnursing\b", re.I), "Nursing"),
+    (re.compile(r"physio\w*", re.I), "Physiotherapy"),
+)
+
+
+def tpo_scope_branch(name, category):
+    """Out-of-scope branch label for a Maps name/category, or "".
+    Matched on name and category together, so a category like
+    "Law college" excludes even when the name is generic."""
+    text = f"{name or ''} {category or ''}"
+    for pattern, label in TPO_SCOPE_EXCLUDE:
+        if pattern.search(text):
+            return label
+    return ""
+
+
+# Management-programme signal (v3.17): a crawled site mentioning
+# BBA/MBA/PGDM-type programmes marks the lead as a confirmed
+# management college, worth a small score bump so BBA/MBA leads
+# sort first in call order. It is a priority signal, not a
+# filter: colleges without it are still kept.
+TPO_MGMT_RE = re.compile(
+    r"\b(BBA|MBA|PGDM|MMS)\b|"
+    r"bachelor of business administration|"
+    r"master of business administration|"
+    r"marketing management|business management",
+    re.I)
 
 
 def find_tpo_general_links(page_html, page_url, website, seen):
@@ -903,22 +949,26 @@ def _fetch_html(url):
 
 def fetch_tpo_contact(website):
     """Best contact for one college website. Returns {phone,
-    phone_kind, tier, label, emails, source} or all-empty when the
-    crawled site publishes no number at all. The Maps/main number
-    is never consulted here, so it can never become a fallback.
-    Crawl, priority-first, max 40 pages per college: the homepage,
-    its placement/TPO pages, the usual placement addresses tried
-    directly (a placement page is not always linked from the
-    homepage with a recognisable label), then the contact/team
-    pages those placement pages link to - and, only when no Tier-1
-    TPO cell number has been found yet, breadth-first over every
-    other same-origin page, because a fallback is pointless once
-    the real cell number exists. The tier rules judge every page,
-    so deeper pages can only add numbers at their own tier, and
-    staff numbers are dropped everywhere. Within a tier, a mobile
-    beats a landline."""
+    phone_kind, tier, label, emails, source, mgmt} or all-empty
+    when the crawled site publishes no number at all. The Maps/
+    main number is never consulted here, so it can never become
+    a fallback. Crawl, priority-first, max 40 fetch attempts per
+    college: the homepage, its placement/TPO pages, the usual
+    placement addresses tried directly (a placement page is not
+    always linked from the homepage with a recognisable label),
+    then the contact/team pages those placement pages link to -
+    and, only when no Tier-1 TPO cell number has been found yet,
+    breadth-first over every other same-origin page, because a
+    fallback is pointless once the real cell number exists. The
+    tier rules judge every page, so deeper pages can only add
+    numbers at their own tier, and staff numbers are dropped
+    everywhere. Within a tier, a mobile beats a landline.
+    Speed: the crawl STOPS the moment a Tier-1 mobile is found
+    (the best possible outcome - later pages can add nothing but
+    an email), instead of fetching every priority page first.
+    Colleges with no Tier-1 number still get the full walk."""
     result = {"phone": "", "phone_kind": "", "tier": 0, "label": "",
-              "emails": [], "source": ""}
+              "emails": [], "source": "", "mgmt": False}
     if not website or "google." in website:
         return result
     home = _fetch_html(website)
@@ -926,42 +976,15 @@ def fetch_tpo_contact(website):
         return result
     l1 = [u for u in find_tpo_links(home, website)
           if u.rstrip("/") != website.rstrip("/")]
+    guesses, deep, breadth = [], [], []
     seen = {website} | set(l1)
     fetched = {website: home}
-    for url in l1:
-        html = _fetch_html(url)
-        if html:
-            fetched[url] = html
-    guesses = []
-    for path in TPO_DIRECT_PATHS:
-        url = website.rstrip("/") + "/" + path
-        if url not in seen:
-            guesses.append(url)
-        if len(guesses) >= 6:
-            break
-    seen |= set(guesses)
-    for url in guesses:
-        html = _fetch_html(url)
-        if html:
-            fetched[url] = html
-    deep = []
-    for url in l1 + guesses:
-        html = fetched.get(url)
-        if html:
-            deep += find_tpo_deep_links(html, url, website, seen)
-        if len(deep) >= 3:
-            break
-    deep = deep[:3]
-    seen |= set(deep)
-    for url in deep:
-        html = _fetch_html(url)
-        if html:
-            fetched[url] = html
 
     def _parse_all():
         """Best (tier, kind, number, label, page) across fetched
-        pages so far, plus every generic TPO email found."""
-        best, emails = None, []
+        pages so far, plus every generic TPO email found and
+        whether any page mentions BBA/MBA-type programmes."""
+        best, emails, mgmt = None, [], False
         for url in [website] + l1 + guesses + deep + breadth:
             html = fetched.get(url)
             if not html:
@@ -974,10 +997,63 @@ def fetch_tpo_contact(website):
             for e in page_emails:
                 if e not in emails:
                     emails.append(e)
-        return best, emails
+            if not mgmt and TPO_MGMT_RE.search(
+                    " ".join(_tpo_text_blocks(html))):
+                mgmt = True
+        return best, emails, mgmt
 
-    breadth = []
-    best, emails = _parse_all()
+    def _finish(best, emails, mgmt):
+        if best is not None:
+            _, num, kind, tier, lbl, url = best
+            result.update(phone=num, phone_kind=kind, tier=tier,
+                          label=lbl, source=url)
+        result["emails"] = emails[:3]
+        result["mgmt"] = mgmt
+        return result
+
+    def _tier1_mobile(best):
+        return best is not None and best[3] == 1 and best[2] == "mobile"
+
+    best, emails, mgmt = _parse_all()
+    if _tier1_mobile(best):
+        return _finish(best, emails, mgmt)
+    for url in l1:
+        html = _fetch_html(url)
+        if html:
+            fetched[url] = html
+        best, emails, mgmt = _parse_all()
+        if _tier1_mobile(best):
+            return _finish(best, emails, mgmt)
+    for path in TPO_DIRECT_PATHS:
+        url = website.rstrip("/") + "/" + path
+        if url not in seen:
+            guesses.append(url)
+        if len(guesses) >= 6:
+            break
+    seen |= set(guesses)
+    for url in guesses:
+        html = _fetch_html(url)
+        if html:
+            fetched[url] = html
+        best, emails, mgmt = _parse_all()
+        if _tier1_mobile(best):
+            return _finish(best, emails, mgmt)
+    for url in l1 + guesses:
+        html = fetched.get(url)
+        if html:
+            deep += find_tpo_deep_links(html, url, website, seen)
+        if len(deep) >= 3:
+            break
+    deep = deep[:3]
+    seen |= set(deep)
+    for url in deep:
+        html = _fetch_html(url)
+        if html:
+            fetched[url] = html
+        best, emails, mgmt = _parse_all()
+        if _tier1_mobile(best):
+            return _finish(best, emails, mgmt)
+    best, emails, mgmt = _parse_all()
     if best is None or best[3] > 1:
         # No Tier-1 number yet: walk the rest of the site. The
         # queue is rebuilt from every fetched page so deeper
@@ -985,6 +1061,7 @@ def fetch_tpo_contact(website):
         # The budget counts fetch ATTEMPTS (phase A already tried
         # the homepage, placement links, guesses and deep links),
         # so a site with many dead guesses cannot blow past it.
+        # A Tier-1 mobile on any breadth page stops the walk.
         tried = 1 + len(l1) + len(guesses) + len(deep)
         queue = []
         for url in [website] + l1 + guesses + deep:
@@ -1003,16 +1080,14 @@ def fetch_tpo_contact(website):
                 continue
             fetched[url] = html
             breadth.append(url)
+            numbers, _ = extract_tpo_from_html(html)
+            if any(kind == "mobile" and tier == 1
+                   for _, kind, tier, _ in numbers):
+                break
             queue += find_tpo_general_links(html, url, website, seen)
             seen |= set(queue)
-        best, emails = _parse_all()
-    if best is not None:
-        _, num, kind, tier, lbl, url = best
-        result["phone"], result["phone_kind"] = num, kind
-        result["tier"], result["label"] = tier, lbl
-        result["source"] = url
-    result["emails"] = emails[:3]
-    return result
+        best, emails, mgmt = _parse_all()
+    return _finish(best, emails, mgmt)
 
 
 def tpo_score_lead(r, tpo):
@@ -1045,6 +1120,12 @@ def tpo_score_lead(r, tpo):
     if r.get("website"):
         score += 20
         reasons.append("Has website")
+    if tpo.get("mgmt"):
+        # Confirmed management programmes: BBA/MBA leads sort
+        # first in call order. Capped, so the bump can never push
+        # a fallback above a Tier-1 number's band on its own.
+        score = min(100, score + 10)
+        reasons.append("BBA/MBA programs mentioned on website")
     tier_out = "A" if score >= 75 else "B" if score >= 50 else "C"
     return score, tier_out, reasons, angle
 
@@ -2061,8 +2142,9 @@ def main():
     if a.vertical == "food" and WORKSPACE_KEY == "healthcare":
         print("  Category recognised as healthcare - using the Healthcare workspace.")
     elif a.vertical == "tpo":
-        print("  TPO mode: ONLY TPO cell numbers will be saved - college "
-              "main numbers and staff numbers are deleted.")
+        print("  TPO mode: TPO cell numbers first, labelled "
+              "fallbacks after - college main numbers and staff "
+              "numbers are deleted.")
     elif WORKSPACE_KEY not in ("restaurants", "healthcare"):
         print(f"  New category recognised - using the separate {WORKSPACE_LABEL} workspace.")
     if a.vertical != "tpo" and any(
@@ -2087,19 +2169,33 @@ def main():
     # no number anywhere on their crawled site, get no "tpo" key
     # and are dropped by the leads loop below. Staff numbers are
     # deleted at every tier, never downgraded into a fallback.
+    # Branch scope runs FIRST: law/pharmacy/medical colleges are
+    # marked out-of-scope on name/category and never crawled.
     if a.vertical == "tpo":
-        sites = [r for r in rows if r.get("website")]
+        scope_out = {}
+        for r in rows:
+            branch = tpo_scope_branch(r.get("name"),
+                                      r.get("category"))
+            if branch:
+                r["tpo_scope"] = branch
+                scope_out[branch] = scope_out.get(branch, 0) + 1
+        sites = [r for r in rows
+                 if r.get("website") and not r.get("tpo_scope")]
         if sites:
-            print(f"\n  checking {len(sites)} college websites for "
-                  "TPO placement pages (several at a time)...")
-            with ThreadPoolExecutor(max_workers=6) as ex:
+            print(f"\n  checking {len(sites)} college websites "
+                  "(full-site crawl, several at a time)...")
+            with ThreadPoolExecutor(max_workers=10) as ex:
                 for r, tpo in zip(sites, ex.map(
                         lambda x: fetch_tpo_contact(x["website"]),
                         sites)):
                     r["tpo"] = tpo
             got = sum(1 for r in sites if (r.get("tpo") or {}).get("phone"))
-            print(f"  TPO cell numbers found for {got} of {len(sites)} "
+            print(f"  Numbers found for {got} of {len(sites)} "
                   "colleges")
+        if scope_out:
+            print("  Out-of-scope branches skipped (never crawled): "
+                  + ", ".join(f"{k} {v}"
+                              for k, v in sorted(scope_out.items())))
 
     # ---- build the 4 databases -------------------------------------------
     # Rule: a restaurant with NO mobile number is not a lead - it is left
@@ -2113,6 +2209,7 @@ def main():
     seen_phones, seen_emails = set(), set()
     skipped_no_phone = 0
     skipped_no_tpo = 0
+    skipped_scope = 0
     skipped_closed = 0
     tpo_tier1_n = 0
     tpo_fallback_n = 0
@@ -2125,6 +2222,9 @@ def main():
             skipped_closed += 1
             continue
         if a.vertical == "tpo":
+            if r.get("tpo_scope"):
+                skipped_scope += 1
+                continue
             tpo = r.get("tpo") or {}
             if not tpo.get("phone"):
                 skipped_no_tpo += 1
@@ -2163,7 +2263,12 @@ def main():
                       "rating": r.get("rating"),
                       "reviews": r.get("reviews"),
                       "score": sc, "tier": tier, "angle": angle,
-                      "why": "; ".join(reasons[:4]),
+                      # TPO reasons run to 5 so the management
+                      # signal and the source page both survive
+                      # (contact, email, website, signal, source).
+                      "why": "; ".join(reasons[:5]
+                                       if a.vertical == "tpo"
+                                       else reasons[:4]),
                       # Date Assigned: the run date, so a lead row
                       # always shows when it was added - new runs
                       # are instantly tellable from older leads.
@@ -2272,6 +2377,10 @@ def main():
               f"{skipped_no_tpo} "
               "(includes staff-only numbers deleted, and college main "
               "numbers never counted)")
+        if skipped_scope:
+            print(f"  Left out - out-of-scope branch: {skipped_scope} "
+                  "(law, pharmacy, medical, dental and other "
+                  "professional health branches - never crawled)")
     else:
         print(f"  {VCFG['count_label']} : {len(names)} "
               "(every one has a mobile number)")
