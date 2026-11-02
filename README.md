@@ -150,26 +150,35 @@ number; the TPO cell's number lives on the college website's
 placement page. So a TPO run does this:
 
 1. Takes the college list from Maps for the location you give.
-2. Opens each college website, goes straight to its placement
-   page — following homepage links AND trying the usual
-   placement addresses directly — then follows that page's
-   contact/team links one level deeper (max 14 pages per
-   college), and reads the number shown there as the cell's own
-   contact. Pages are read in full (up to 2 MB), so footer
-   contact blocks on large modern sites are no longer cut off.
-3. Saves the college ONLY if such a number exists.
+2. Opens each college website and walks it priority-first —
+   homepage, placement pages (following homepage links AND trying
+   the usual placement addresses directly), then that page's
+   contact/team links — and, when no TPO cell number has been
+   found yet, breadth-first over every other page on the same
+   site, up to 40 pages per college. Pages are read in full
+   (up to 2 MB), so footer contact blocks on large modern sites
+   are no longer cut off.
+3. Saves the college with the best number its site publishes,
+   in this order: the TPO cell's own number first; if the site
+   has no TPO number, another office's number (admissions,
+   career services, registrar, admin, student services); if it
+   has neither, a general website number (footer/header/contact
+   page). Every saved number carries its tier label and the page
+   it came from in the "Why this lead" column, so a fallback is
+   never mistaken for a TPO number.
 
-The rule is strict, by instruction: **only TPO cell numbers are
-saved**. The college's main number is never counted as a TPO
-number, and any other staff member's number is deleted — it is not
-stored in the database, the Excel file, the tracker, or the CSVs.
-When a number's context is ambiguous (for example a cell block that
-also names a person), the number is dropped rather than guessed.
-TPO office landlines ARE kept and tagged as landline, because a
-cell's published number is often a landline; mobiles are preferred
-when a page lists both. Generic TPO emails (`tpo@…`,
-`placement@…`) are kept as a secondary contact; personal emails are
-dropped.
+Two rules are NOT relaxed: **a number attached to a named person
+is deleted at every tier** — it is never downgraded into a
+fallback, and it is not stored in the database, the Excel file,
+the tracker, or the CSVs. And **the college's main number from
+Maps is never used** — every fallback number comes from the
+website itself, with its section label. When a number's context
+is ambiguous (for example a cell block that also names a person),
+the number is dropped rather than guessed. TPO office landlines
+ARE kept and tagged as landline, because a cell's published
+number is often a landline; mobiles are preferred when a page
+lists both. Generic TPO emails (`tpo@…`, `placement@…`) are kept
+as a secondary contact; personal emails are dropped.
 
 TPO data gets its own database (`vaani_tpo.db`), tracker
 (`vaani-tpo-tracker.xlsx`) and output folder
@@ -183,10 +192,11 @@ Pilot command (Ahmedabad only):
 py vaani.py --vertical tpo --category "Colleges" --location "Ahmedabad"
 ```
 
-Expect partial coverage: many colleges publish no separate TPO
-number at all (only an email, a form, or an officer's name), so the
-run summary's "Left out - no TPO cell number" count is the honest
-yield figure. The direct-placement crawl is v3.15.0 in the
+Expect better coverage than the early pilots: a college is left
+out only when its whole crawled site publishes no number at all,
+so the run summary's "Left out - no number found on website"
+count is the honest yield figure, with the TPO-cell vs fallback
+split printed beside it. The full-site crawl is v3.16.0 in the
 workspace and reaches your PC only when it is published.
 
 ## Delivery-first mid-tier segment (`--segment delivery`)
