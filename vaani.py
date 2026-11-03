@@ -35,7 +35,7 @@ import sqlite3
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
-VERSION = "3.18.0"
+VERSION = "3.18.1"
 UPDATE_URL = ("https://raw.githubusercontent.com/yash6969-io/"
               "vaani-lead-engine/main/vaani.py")
 
@@ -2333,7 +2333,10 @@ def main():
             print(f"\n  web-searching {len(needy)} colleges whose "
                   "websites gave no number (directories, news "
                   "pages)...")
-            with ThreadPoolExecutor(max_workers=10) as ex:
+            # Only 4 search workers: DuckDuckGo throttles bursts
+            # of parallel searches (redirects to its homepage),
+            # so fewer at once gives steadier results than 10.
+            with ThreadPoolExecutor(max_workers=4) as ex:
                 for r, found in zip(needy, ex.map(
                         lambda x: search_tpo_contact(x["name"]),
                         needy)):
