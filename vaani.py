@@ -35,7 +35,7 @@ import sqlite3
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
-VERSION = "3.17.0"
+VERSION = "3.18.0"
 UPDATE_URL = ("https://raw.githubusercontent.com/yash6969-io/"
               "vaani-lead-engine/main/vaani.py")
 
@@ -604,16 +604,26 @@ def fetch_emails(website):
 #     services (labelled with that office's name);
 #   Tier 3 "General": any other number on the site with no office
 #     label (footer/header/contact-page number), labelled General.
-# Two rules from the original brief are NOT relaxed:
+# Wider net (v3.18): when the website yields nothing, the run
+# tries two more sources before giving up, in this order:
+#   Web search: one DuckDuckGo search per numberless college for
+#     its placement-cell contact, same tier parser over the top
+#     result pages (directory/news pages the crawl could not
+#     reach). A search hit keeps its tier and source page.
+#   Tier 4 "College main number (Maps)": the Maps listing's own
+#     number, labelled as exactly that - the last resort, never
+#     mistaken for a TPO number. This is the one deliberate
+#     reversal of the original "Maps number never used" rule:
+#     a reachable college number beats no number, when every
+#     better source has been tried first.
+# One rule from the original brief is NOT relaxed:
 #   * a number attached to a named person (officer, professor,
 #     coordinator, "Contact Person: <Name>") is DELETED at every
 #     tier - it is never downgraded into a fallback, and never
 #     stored in any output. When in doubt, the number is dropped.
-#   * the college's main number from Google Maps is NEVER used -
-#     every fallback number comes from the website itself, with
-#     its section label and source page.
-# A college with no number anywhere on its crawled site is still
-# left out of every file (there is nothing to give). TPO office
+# A college with no contact from any source - website, web
+# search, Maps - is still left out of every file (there is
+# nothing to give, and nothing is invented). TPO office
 # landlines ARE kept and tagged as landline, because a cell's
 # published number is often a landline; mobiles are preferred
 # when a page lists both.
@@ -1090,6 +1100,120 @@ def fetch_tpo_contact(website):
     return _finish(best, emails, mgmt)
 
 
+# Web-search fallback (v3.18): for colleges whose own website
+# yielded no number, one DuckDuckGo HTML search for the college's
+# placement-cell contact, then the same tier parser over the top
+# result pages. This is how a TPO number published on a directory
+# page, a news page, or a site page the crawl could not reach
+# (JS-rendered, 403) is still found. No API key, no login; if
+# the search is blocked or empty it silently yields nothing - the
+# run never fails on it. Social and video pages are skipped
+# (login walls, no numbers there).
+TPO_SEARCH_SKIP_HOSTS = ("facebook.com", "instagram.com",
+                          "linkedin.com", "youtube.com",
+                          "twitter.com", "x.com")
+
+
+def tpo_search_result_urls(query):
+    """Top result-page URLs for one DuckDuckGo HTML search."""
+    try:
+        req = urllib.request.Request(
+            "https://html.duckduckgo.com/html/?q="
+            + urllib.parse.quote_plus(query),
+            headers={"User-Agent": BROWSER_UA})
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            html = resp.read(500000).decode("utf-8", "replace")
+    except Exception:
+        return []
+    urls = []
+    for href in re.findall(
+            r'<a[^>]*class="result__a"[^>]*href="([^"]+)"', html):
+        m = re.search(r"uddg=([^&]+)", href)
+        if m:
+            try:
+                url = urllib.parse.unquote(m.group(1))
+            except Exception:
+                continue
+        elif href.startswith("http"):
+            url = href
+        else:
+            continue
+        host = urllib.parse.urlparse(url).netloc.lower()
+        if any(host == h or host.endswith("." + h)
+               for h in TPO_SEARCH_SKIP_HOSTS):
+            continue
+        if url not in urls:
+            urls.append(url)
+        if len(urls) >= 3:
+            break
+    return urls
+
+
+def search_tpo_contact(name):
+    """Best contact for one college from web search. Same dict
+    shape as fetch_tpo_contact (tier/label/source set from the
+    result page) or all-empty. Only runs for colleges whose own
+    website yielded nothing, so its cost is bounded to the
+    colleges that need it."""
+    result = {"phone": "", "phone_kind": "", "tier": 0, "label": "",
+              "emails": [], "source": "", "mgmt": False}
+    if not name:
+        return result
+    best = None
+    for url in tpo_search_result_urls(
+            f"{name} placement cell contact number"):
+        html = _fetch_html(url)
+        if not html:
+            continue
+        numbers, page_emails = extract_tpo_from_html(html)
+        for num, kind, tier, lbl in numbers:
+            rank = (tier, 0 if kind == "mobile" else 1)
+            if best is None or rank < best[0]:
+                best = (rank, num, kind, tier, lbl, url)
+        if best is not None and best[3] == 1 and best[2] == "mobile":
+            break
+        for e in page_emails:
+            if e not in result["emails"]:
+                result["emails"].append(e)
+    if best is not None:
+        _, num, kind, tier, lbl, url = best
+        result.update(phone=num, phone_kind=kind, tier=tier,
+                      label=lbl, source=url)
+    result["emails"] = result["emails"][:3]
+    return result
+
+
+def maps_fallback_number(raw):
+    """First callable number in a Maps phone field: a mobile if
+    one is listed, else a validated STD landline. Maps fields can
+    hold several numbers separated by commas/semicolons. The
+    food-mode phone filter drops landlines, so this has its own
+    parse - and it checks landline FIRST per part, because a
+    +91-prefixed landline ("+91 79 2656 1234") would otherwise
+    misread as a mobile. Returns (number, kind) or ("", "")."""
+    if not raw:
+        return "", ""
+    mobile = landline = ""
+    for part in re.split(r"[,;/|]", str(raw)):
+        land = _tpo_landline(part)
+        if not land:
+            d = re.sub(r"\D", "", part)
+            if len(d) == 12 and d.startswith("91"):
+                land = _tpo_landline("0" + d[2:])
+        if land:
+            if not landline:
+                landline = land
+            continue
+        mob = clean_phone(part)
+        if mob and not mobile:
+            mobile = mob
+    if mobile:
+        return mobile, "mobile"
+    if landline:
+        return landline, "landline"
+    return "", ""
+
+
 def tpo_score_lead(r, tpo):
     """TPO contactability score (starting estimate, NOT the food
     rubric). Tier 1 keeps the 3.13 values: a TPO mobile is worth
@@ -1097,9 +1221,10 @@ def tpo_score_lead(r, tpo):
     generic TPO email and a website add reach. Fallbacks score
     lower by design, so a fallback number can never outrank a
     real TPO cell number: Tier 2 caps at 70 (B), Tier 3 at 55
-    (low B). The reason always names the tier, so the caller
-    sees what kind of number they are dialling. Bands reuse
-    A>=75 / B 50-74 / C<50 so call order works."""
+    (low B), Tier 4 (Maps main number) at 50 (B). The reason
+    always names the tier, so the caller sees what kind of number
+    they are dialling. Bands reuse A>=75 / B 50-74 / C<50 so call
+    order works."""
     tier = tpo.get("tier") or 1
     kind = tpo.get("phone_kind")
     if tier <= 1:
@@ -1108,6 +1233,11 @@ def tpo_score_lead(r, tpo):
                    if kind == "mobile"
                    else "TPO cell landline from placement page"]
         angle = "TPO cell outreach"
+    elif tier == 4:
+        score = 10 if kind == "mobile" else 5
+        reasons = ["College main number from Maps - fallback, "
+                   "not a TPO cell number"]
+        angle = "Fallback college number"
     else:
         base = (30, 20) if tier == 2 else (15, 10)
         score = base[0] if kind == "mobile" else base[1]
@@ -2192,6 +2322,31 @@ def main():
             got = sum(1 for r in sites if (r.get("tpo") or {}).get("phone"))
             print(f"  Numbers found for {got} of {len(sites)} "
                   "colleges")
+        # Wider net (v3.18): colleges whose own website gave no
+        # number get one web search each, in parallel, before the
+        # Maps fallback is considered. Website emails/management
+        # signal found earlier are kept even when the number comes
+        # from search.
+        needy = [r for r in rows if not r.get("tpo_scope")
+                 and not (r.get("tpo") or {}).get("phone")]
+        if needy:
+            print(f"\n  web-searching {len(needy)} colleges whose "
+                  "websites gave no number (directories, news "
+                  "pages)...")
+            with ThreadPoolExecutor(max_workers=10) as ex:
+                for r, found in zip(needy, ex.map(
+                        lambda x: search_tpo_contact(x["name"]),
+                        needy)):
+                    if found.get("phone"):
+                        base = r.get("tpo") or {}
+                        if base.get("emails"):
+                            found["emails"] = base["emails"]
+                        found["mgmt"] = base.get("mgmt", False)
+                        r["tpo"] = found
+            search_got = sum(1 for r in needy
+                             if (r.get("tpo") or {}).get("phone"))
+            print(f"  Web search found numbers for {search_got} of "
+                  f"{len(needy)} colleges")
         if scope_out:
             print("  Out-of-scope branches skipped (never crawled): "
                   + ", ".join(f"{k} {v}"
@@ -2201,9 +2356,9 @@ def main():
     # Rule: a restaurant with NO mobile number is not a lead - it is left
     # out of every file. (Landline-only counts as no number: landlines are
     # dropped by the phone filter, so nothing callable remains.)
-    # TPO rule: a college with NO number anywhere on its crawled
-    # website is not a lead. Its Maps/main number is never counted,
-    # and any staff number is deleted, never saved anywhere.
+    # TPO rule: a college with NO contact from any source - its
+    # website, web search, or Maps listing - is not a lead. Staff
+    # numbers are deleted, never saved anywhere.
     leads, seen_places = [], set()
     names, locations, phones, emails = [], [], [], []
     seen_phones, seen_emails = set(), set()
@@ -2213,6 +2368,7 @@ def main():
     skipped_closed = 0
     tpo_tier1_n = 0
     tpo_fallback_n = 0
+    tpo_tier4_n = 0
     for r in rows:
         key = (r["name"].lower(), r["address"].lower())
         if key in seen_places:
@@ -2227,10 +2383,25 @@ def main():
                 continue
             tpo = r.get("tpo") or {}
             if not tpo.get("phone"):
+                # Last resort (v3.18): the Maps main number,
+                # labelled so it is never mistaken for a TPO
+                # number. This comes only from the Maps listing
+                # itself, never from a named person.
+                mnum, mkind = maps_fallback_number(r.get("phone"))
+                if mnum:
+                    tpo = {"phone": mnum, "phone_kind": mkind,
+                           "tier": 4,
+                           "label": "College main number (Maps)",
+                           "emails": tpo.get("emails") or [],
+                           "source": "Google Maps listing",
+                           "mgmt": tpo.get("mgmt", False)}
+            if not tpo.get("phone"):
                 skipped_no_tpo += 1
                 continue
             if (tpo.get("tier") or 1) <= 1:
                 tpo_tier1_n += 1
+            elif tpo.get("tier") == 4:
+                tpo_tier4_n += 1
             else:
                 tpo_fallback_n += 1
             mob = [tpo["phone"]]
@@ -2311,10 +2482,9 @@ def main():
         if a.vertical == "tpo":
             sys.exit(
                 f"\n  Found {len(rows)} places, but none of them had "
-                "any number\n  on their websites (college main numbers "
-                "from Maps are never\n  counted, and staff numbers are "
-                "deleted, never saved).\n  Nothing was "
-                "saved - try a different area.\n")
+                "any contact\n  (websites, web search and Maps all "
+                "tried; staff numbers are\n  deleted, never saved).\n"
+                "  Nothing was saved - try a different area.\n")
         sys.exit(
             f"\n  Found {len(rows)} places, but none of them had a mobile "
             "number\n  (landlines don't count). Nothing was saved - try a "
@@ -2372,11 +2542,12 @@ def main():
     if a.vertical == "tpo":
         print(f"  {VCFG['count_label']} : {len(names)} "
               f"({tpo_tier1_n} TPO cell numbers, {tpo_fallback_n} "
-              "labelled fallbacks - another office or general)")
-        print(f"  Left out - no number found on website: "
+              "labelled fallbacks - another office or general, "
+              f"{tpo_tier4_n} Maps main numbers)")
+        print(f"  Left out - no contact found anywhere: "
               f"{skipped_no_tpo} "
-              "(includes staff-only numbers deleted, and college main "
-              "numbers never counted)")
+              "(websites, web search and Maps all tried; staff-only "
+              "numbers deleted)")
         if skipped_scope:
             print(f"  Left out - out-of-scope branch: {skipped_scope} "
                   "(law, pharmacy, medical, dental and other "
