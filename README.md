@@ -227,8 +227,8 @@ out only when it is out of scope, or when no source yields a
 contact at all, so the run summary's "Left out" counts are the
 honest yield figures, with the TPO-cell vs fallback vs Maps-main
 split printed beside them. The wider net (web search + Maps
-main number) is v3.18.0 in the workspace and reaches your PC
-only when it is published.
+main number, with gentler search parallelism) is v3.18.1 in the
+workspace and reaches your PC only when it is published.
 
 ## Delivery-first mid-tier segment (`--segment delivery`)
 
