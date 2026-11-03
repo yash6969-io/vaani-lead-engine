@@ -212,13 +212,23 @@ runs crawl 10 colleges at a time instead of 6. Colleges with no
 TPO number still get the full walk, so a run still takes
 minutes — just with the wasted fetches cut out.
 
+Wider net (v3.18): the website is no longer the only source.
+When a college's own site yields no number, the run tries a web
+search for that college's placement-cell contact (one DuckDuckGo
+search, same tier rules over the top result pages — directory
+and news pages the crawl could not reach), and only then falls
+back to the Maps listing's own number as Tier 4, labelled
+"College main number (Maps)". A college is left out only when
+website, web search and Maps all yield nothing — and nothing is
+ever invented. Staff numbers are still deleted at every tier.
+
 Expect better coverage than the early pilots: a college is left
-out only when it is out of scope, or when its whole crawled site
-publishes no number at all, so the run summary's "Left out"
-counts are the honest yield figures, with the TPO-cell vs
-fallback split printed beside them. The branch scope, management
-priority and faster crawl are v3.17.0 in the
-workspace and reach your PC only when they are published.
+out only when it is out of scope, or when no source yields a
+contact at all, so the run summary's "Left out" counts are the
+honest yield figures, with the TPO-cell vs fallback vs Maps-main
+split printed beside them. The wider net (web search + Maps
+main number) is v3.18.0 in the workspace and reaches your PC
+only when it is published.
 
 ## Delivery-first mid-tier segment (`--segment delivery`)
 
