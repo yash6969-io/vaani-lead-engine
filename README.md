@@ -226,7 +226,23 @@ Scrapling trial removed (v3.19.1): the v3.19.0 Scrapling
 fallback for the TPO website crawl proved of no use, so it
 is removed entirely — the TPO crawl is back to the built-in
 fetch only, and no Scrapling install is needed or used.
-v3.19.1 is built locally, not published yet.
+
+List mode (v3.20.0): `py vaani.py --vertical tpo --location "Jaipur"
+--from-list jaipur-colleges.csv` reads colleges from a CSV
+(College, Website columns) instead of scraping Google Maps.
+Everything downstream runs exactly as in a normal TPO run — branch
+scope filter, full-site crawl, web-search fallback for numberless
+colleges, tiering, scoring, the TPO database, tracker and output
+folder — but no Maps data is used at all: no browser is needed,
+and the Maps main-number fallback can never fire (a college whose
+website and web search both yield nothing is left out, honestly
+counted). The CSV may repeat a college only if its website
+differs; same-website rows are deduped, and a row without a
+website is still tried by web search. `--from-list` only works
+with `--vertical tpo`; `--max` is ignored in list mode. Use it
+when the college list comes from direct research instead of Maps
+— the CRM picks up the resulting vaani_tpo.db as a "TPO Cells"
+workspace, same as any TPO run.
 
 Expect better coverage than the early pilots: a college is left
 out only when it is out of scope, or when no source yields a
