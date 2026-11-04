@@ -32,10 +32,11 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 import sqlite3
+import threading
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
-VERSION = "3.18.1"
+VERSION = "3.19.0"
 UPDATE_URL = ("https://raw.githubusercontent.com/yash6969-io/"
               "vaani-lead-engine/main/vaani.py")
 
@@ -957,6 +958,96 @@ def _fetch_html(url):
         return ""
 
 
+# Scrapling fallback (v3.19, TPO website crawl ONLY): when the
+# built-in fetch fails for a college website page, or the
+# homepage turns out to be a JavaScript shell with almost no
+# readable text, try Scrapling - first its fast HTTP fetcher
+# (TLS impersonation, often passes 403 blocks), then, for the
+# homepage only, its browser fetcher (renders JavaScript).
+# Scrapling is an OPTIONAL dependency: if it is not installed,
+# every helper below returns "" and the crawl behaves exactly
+# as before. Nothing else in Vaani uses it - the Maps leg, the
+# food/healthcare website checks and the web-search leg all keep
+# the built-in fetch. Set VAANI_NO_SCRAPLING=1 to disable the
+# fallback entirely. The browser fallback is serialised with a
+# lock (the crawl runs 10 colleges at a time) and runs at most
+# once per college, so a hard site cannot spawn a fleet of
+# browsers or stall the run.
+_SCRAPLING_BROWSER_LOCK = threading.Lock()
+
+
+def _scrapling_http(url):
+    """One Scrapling HTTP-fetcher attempt. Page HTML on a 2xx
+    response, else "". Never raises."""
+    if os.environ.get("VAANI_NO_SCRAPLING") == "1":
+        return ""
+    try:
+        from scrapling.fetchers import Fetcher
+    except Exception:
+        return ""
+    try:
+        resp = Fetcher().get(url, timeout=15)
+        if 200 <= getattr(resp, "status", 0) < 300:
+            return getattr(resp, "html_content", "") or ""
+    except Exception:
+        pass
+    return ""
+
+
+def _scrapling_browser(url):
+    """One Scrapling browser-fetcher attempt (renders
+    JavaScript). Page HTML on a 2xx response, else "". Never
+    raises. Timeout is in milliseconds for this fetcher."""
+    if os.environ.get("VAANI_NO_SCRAPLING") == "1":
+        return ""
+    try:
+        from scrapling.fetchers import StealthyFetcher
+    except Exception:
+        return ""
+    try:
+        with _SCRAPLING_BROWSER_LOCK:
+            resp = StealthyFetcher().fetch(url, timeout=20000)
+        if 200 <= getattr(resp, "status", 0) < 300:
+            return getattr(resp, "html_content", "") or ""
+    except Exception:
+        pass
+    return ""
+
+
+def _page_is_js_shell(html):
+    """True when a page has almost no readable text - the
+    signature of a JavaScript shell (PDPU's homepage renders
+    its content in the browser, so the plain fetch returns a
+    near-empty page). Script/style content does not count."""
+    text = re.sub(r"<(script|style)[^>]*>.*?</\1>", " ", html,
+                  flags=re.I | re.S)
+    text = re.sub(r"<[^>]+>", " ", text)
+    return len(re.sub(r"\s+", " ", text).strip()) < 300
+
+
+def _fetch_html_tpo(url, is_homepage=False):
+    """Fetch for the TPO website crawl: the built-in fetch
+    first, Scrapling only when it fails. A failed fetch tries
+    the HTTP fetcher, then (homepage only) the browser fetcher;
+    a JavaScript-shell homepage tries the browser fetcher only
+    (the HTTP fetcher would return the same shell). Any other
+    page is returned as fetched - the fallback never re-fetches
+    a page that already returned content, so a healthy crawl
+    costs nothing extra and a Scrapling-free machine behaves
+    exactly as before."""
+    html = _fetch_html(url)
+    if html:
+        if is_homepage and _page_is_js_shell(html):
+            return _scrapling_browser(url) or html
+        return html
+    html = _scrapling_http(url)
+    if html:
+        return html
+    if is_homepage:
+        return _scrapling_browser(url)
+    return ""
+
+
 def fetch_tpo_contact(website):
     """Best contact for one college website. Returns {phone,
     phone_kind, tier, label, emails, source, mgmt} or all-empty
@@ -981,7 +1072,7 @@ def fetch_tpo_contact(website):
               "emails": [], "source": "", "mgmt": False}
     if not website or "google." in website:
         return result
-    home = _fetch_html(website)
+    home = _fetch_html_tpo(website, is_homepage=True)
     if not home:
         return result
     l1 = [u for u in find_tpo_links(home, website)
@@ -1028,7 +1119,7 @@ def fetch_tpo_contact(website):
     if _tier1_mobile(best):
         return _finish(best, emails, mgmt)
     for url in l1:
-        html = _fetch_html(url)
+        html = _fetch_html_tpo(url)
         if html:
             fetched[url] = html
         best, emails, mgmt = _parse_all()
@@ -1042,7 +1133,7 @@ def fetch_tpo_contact(website):
             break
     seen |= set(guesses)
     for url in guesses:
-        html = _fetch_html(url)
+        html = _fetch_html_tpo(url)
         if html:
             fetched[url] = html
         best, emails, mgmt = _parse_all()
@@ -1057,7 +1148,7 @@ def fetch_tpo_contact(website):
     deep = deep[:3]
     seen |= set(deep)
     for url in deep:
-        html = _fetch_html(url)
+        html = _fetch_html_tpo(url)
         if html:
             fetched[url] = html
         best, emails, mgmt = _parse_all()
@@ -1085,7 +1176,7 @@ def fetch_tpo_contact(website):
             if url in fetched:
                 continue
             tried += 1
-            html = _fetch_html(url)
+            html = _fetch_html_tpo(url)
             if not html:
                 continue
             fetched[url] = html
