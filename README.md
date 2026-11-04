@@ -222,6 +222,31 @@ back to the Maps listing's own number as Tier 4, labelled
 website, web search and Maps all yield nothing — and nothing is
 ever invented. Staff numbers are still deleted at every tier.
 
+Scrapling trial (v3.19, TPO website crawl only): when the
+built-in fetch fails for a college website page (403, blocked,
+unreachable), the crawl retries that page with Scrapling —
+first its fast HTTP fetcher, then, for the homepage only, its
+browser fetcher, which renders JavaScript pages the plain fetch
+returns as a near-empty shell. A healthy crawl costs nothing
+extra, and without Scrapling installed the crawl behaves
+exactly as before. This changes nothing else: the Maps leg,
+the food/healthcare website checks and the web-search leg never
+use Scrapling, and every tier, staff-deletion and scoring rule
+is unchanged — Scrapling only fetches pages, it never decides
+what counts as a number. Optional one-time setup on your PC,
+only needed if you want the fallback to actually run (skip it
+and Vaani still runs exactly as before):
+
+```
+py -m pip install scrapling[fetchers]
+scrapling install
+```
+
+To switch the fallback off again without uninstalling, set
+`VAANI_NO_SCRAPLING=1` before running Vaani. v3.19.0 is built
+locally, not published yet — it reaches your PC only when it
+is published.
+
 Expect better coverage than the early pilots: a college is left
 out only when it is out of scope, or when no source yields a
 contact at all, so the run summary's "Left out" counts are the
