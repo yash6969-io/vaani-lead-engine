@@ -35,7 +35,7 @@ import sqlite3
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
-VERSION = "3.19.1"
+VERSION = "3.20.0"
 UPDATE_URL = ("https://raw.githubusercontent.com/yash6969-io/"
               "vaani-lead-engine/main/vaani.py")
 
@@ -2216,6 +2216,56 @@ def _write_tracker_row(ws, r, d):
 
 # ---------------------------------------------------------------- main
 
+def read_list_csv(path):
+    """Read a curated college list for --from-list (TPO list mode).
+
+    CSV with a name column (College / College name / Name) and a
+    website column (Website / Site / URL). Extra columns are
+    ignored. A row without a website is kept - the web-search
+    fallback can still find it by name. Rows sharing a website
+    are deduped (first wins), so a list never double-counts a
+    college. Returns scrape-style row dicts with no Maps data:
+    no phone, no rating, no reviews - the website crawl and web
+    search are the only contact sources in list mode, so the
+    Maps main-number fallback can never fire. Exits with a plain
+    message when the file is missing, has no name column, or
+    has no usable rows."""
+    import csv
+    if not os.path.exists(path):
+        sys.exit(f"\n  List file not found: {path}\n"
+                 "  Give a CSV with College and Website columns.\n")
+    rows, seen_sites = [], set()
+    with open(path, newline="", encoding="utf-8-sig") as f:
+        reader = csv.DictReader(f)
+        fields = {(h or "").strip().lower(): h
+                  for h in (reader.fieldnames or [])}
+        name_key = (fields.get("college") or fields.get("college name")
+                    or fields.get("name"))
+        site_key = (fields.get("website") or fields.get("site")
+                    or fields.get("url"))
+        if not name_key:
+            sys.exit("\n  List file has no College/Name column - "
+                     "add one and re-run.\n")
+        for raw in reader:
+            name = (raw.get(name_key) or "").strip()
+            if not name:
+                continue
+            site = (raw.get(site_key) or "").strip() if site_key else ""
+            key = site.lower().rstrip("/")
+            if key and key in seen_sites:
+                continue
+            if key:
+                seen_sites.add(key)
+            rows.append({"name": name, "address": "", "website": site,
+                         "category": "Colleges", "phone": "",
+                         "rating": None, "reviews": None,
+                         "services": {}, "price_level": None, "web": {}})
+    if not rows:
+        sys.exit("\n  List file has no usable rows - add College names "
+                 "and re-run.\n")
+    return rows
+
+
 def main():
     # Update FIRST, parse arguments second. Otherwise a brand-new flag
     # (like --segment) is rejected by the OLD copy before the updater
@@ -2252,6 +2302,14 @@ def main():
                          "only delivery-first mid-tier places "
                          "(delivery + dine-in or cloud kitchen, not "
                          "famous, not carts, everyday prices)")
+    ap.add_argument("--from-list",
+                    help="TPO list mode: read colleges from a CSV "
+                         "(College, Website columns) instead of "
+                         "scraping Google Maps - the website crawl, "
+                         "tiers and scoring run exactly as usual, "
+                         "but no Maps data is used (so no browser "
+                         "is needed and the Maps main-number "
+                         "fallback can never fire)")
     a = ap.parse_args()
     requested_category = a.category
     apply_category(requested_category, a.vertical)
@@ -2283,14 +2341,25 @@ def main():
         print("  (Note: this category looks like colleges - for TPO CELL "
               "numbers, re-run with --vertical tpo.)")
 
-    rows = scrape(location, a.category, a.max,
-                  a.email and a.vertical != "tpo", a.headless,
-                  tpo_mode=(a.vertical == "tpo"))
-    if not rows:
-        sys.exit(
-            "\n  No places were read. Either Google is rate-limiting right "
-            "now\n  (wait 30-60 minutes and run again) or no listings "
-            "matched.\n  Nothing was saved.\n")
+    if a.from_list:
+        if a.vertical != "tpo":
+            sys.exit("\n  --from-list is a TPO list mode - re-run with "
+                     "--vertical tpo.\n")
+        rows = read_list_csv(a.from_list)
+        for r in rows:
+            r["address"] = location
+        print(f"\n  List mode: {len(rows)} colleges from {a.from_list} "
+              "- no Maps scrape, website crawl only "
+              "(--max ignored in list mode).")
+    else:
+        rows = scrape(location, a.category, a.max,
+                      a.email and a.vertical != "tpo", a.headless,
+                      tpo_mode=(a.vertical == "tpo"))
+        if not rows:
+            sys.exit(
+                "\n  No places were read. Either Google is rate-limiting right "
+                "now\n  (wait 30-60 minutes and run again) or no listings "
+                "matched.\n  Nothing was saved.\n")
 
     # ---- TPO mode: the contact number comes from the college
     # website itself, never from Maps. Tier 1 is the TPO cell's
@@ -2483,10 +2552,14 @@ def main():
                     "list.\n")
             sys.exit(msg)
         if a.vertical == "tpo":
+            tried = ("website and web search tried (no Maps listing "
+                     "in list mode)"
+                     if a.from_list else
+                     "websites, web search and Maps all tried")
             sys.exit(
                 f"\n  Found {len(rows)} places, but none of them had "
-                "any contact\n  (websites, web search and Maps all "
-                "tried; staff numbers are\n  deleted, never saved).\n"
+                f"any contact\n  ({tried}; staff numbers are\n  "
+                "deleted, never saved).\n"
                 "  Nothing was saved - try a different area.\n")
         sys.exit(
             f"\n  Found {len(rows)} places, but none of them had a mobile "
@@ -2547,10 +2620,13 @@ def main():
               f"({tpo_tier1_n} TPO cell numbers, {tpo_fallback_n} "
               "labelled fallbacks - another office or general, "
               f"{tpo_tier4_n} Maps main numbers)")
+        tried = ("website and web search tried (no Maps listing in "
+                 "list mode); staff-only numbers deleted"
+                 if a.from_list else
+                 "websites, web search and Maps all tried; staff-only "
+                 "numbers deleted")
         print(f"  Left out - no contact found anywhere: "
-              f"{skipped_no_tpo} "
-              "(websites, web search and Maps all tried; staff-only "
-              "numbers deleted)")
+              f"{skipped_no_tpo} ({tried})")
         if skipped_scope:
             print(f"  Left out - out-of-scope branch: {skipped_scope} "
                   "(law, pharmacy, medical, dental and other "
